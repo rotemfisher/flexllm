@@ -1,0 +1,6 @@
+langgraph
+langchain-ollama
+python-dotenv
+pydantic
+qdrant-client
+fastembed
