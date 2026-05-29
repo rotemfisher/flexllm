@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient
@@ -8,10 +6,8 @@ from qdrant_client.models import (
     Prefetch, Fusion, SparseVector,
 )
 from langchain_core.tools import tool
+from src.config import config
 
-_QDRANT_PATH  = Path(__file__).parent.parent.parent / "data" / "qdrant_db"
-_COLLECTION   = "coaching_books"
-_EMBED_MODEL  = "BAAI/bge-large-en-v1.5"
 _SPARSE_MODEL = "Qdrant/bm25"
 _RERANK_MODEL = "BAAI/bge-reranker-large"
 
@@ -25,8 +21,8 @@ _rerank_model = None
 def _get_models():
     global _client, _dense_model, _sparse_model, _rerank_model
     if _client is None:
-        _client       = QdrantClient(path=str(_QDRANT_PATH))
-        _dense_model  = SentenceTransformer(_EMBED_MODEL, device="cpu")
+        _client       = QdrantClient(path=config.QDRANT_PATH)
+        _dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
         _sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
         _rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
     return _client, _dense_model, _sparse_model, _rerank_model
@@ -81,7 +77,7 @@ def search_coaching_books(query: str, book_filter: str | None = None, n_results:
     # Fetch a wider candidate pool so the reranker has more to work with
     rerank_pool = max(n_results * 6, 30)
     results = client.query_points(
-        collection_name=_COLLECTION,
+        collection_name=config.QDRANT_COLLECTION,
         prefetch=[
             Prefetch(query=dense_vec, using="dense", limit=rerank_pool),
             Prefetch(query=sparse_q,  using="sparse", limit=rerank_pool),

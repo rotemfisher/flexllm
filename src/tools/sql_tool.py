@@ -1,11 +1,9 @@
 import json
 import re
 import sqlite3
-from pathlib import Path
 
 from langchain_core.tools import tool
-
-_DB_PATH = Path(__file__).parent.parent.parent / "data" / "personal" / "running.db"
+from src.config import config
 
 _WRITE_OPS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b",
@@ -43,11 +41,14 @@ def query_running_database(query: str) -> str:
     if not re.search(r"\bLIMIT\b", query, re.IGNORECASE):
         query = query.rstrip("; ") + " LIMIT 50"
 
+    con = None
     try:
-        con = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         rows = [dict(r) for r in con.execute(query).fetchall()]
-        con.close()
         return json.dumps(rows, default=str) if rows else "No results found."
     except Exception as exc:
         return f"Query error: {exc}"
+    finally:
+        if con:
+            con.close()

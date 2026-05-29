@@ -16,11 +16,19 @@ PRAGMA synchronous    = NORMAL;
 -- =============================================================
 
 CREATE TABLE IF NOT EXISTS athlete_profile (
-    id               INTEGER PRIMARY KEY,
-    date_of_birth    TEXT NOT NULL,          -- "YYYY-MM-DD"
-    biological_sex   TEXT,                   -- 'male' | 'female' | 'other'
-    blood_type       TEXT,                   -- e.g. 'B-'
-    updated_at       TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+    id                   INTEGER PRIMARY KEY,
+    date_of_birth        TEXT NOT NULL,          -- "YYYY-MM-DD"
+    biological_sex       TEXT,                   -- 'male' | 'female' | 'other'
+    blood_type           TEXT,                   -- e.g. 'B-'
+    height_cm            REAL,                   -- BMR calculation
+    current_goal         TEXT,                   -- 'fat_loss' | 'muscle_gain' | 'marathon_prep' | '10k_prep' | 'maintenance' | ...
+    secondary_goal       TEXT,                   -- optional second goal (e.g. 'muscle_gain' while training for 10k)
+    target_weight_kg     REAL,
+    dietary_pref         TEXT,                   -- 'vegan' | 'omnivore' | 'gluten-free' | ...
+    fitness_level        TEXT DEFAULT 'intermediate'
+                         CHECK (fitness_level IN ('beginner', 'intermediate', 'advanced')),
+    onboarding_complete  INTEGER DEFAULT 0,      -- 0 = needs physical assessment, 1 = baseline established
+    updated_at           TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
 );
 
 -- Shoe rack — lets the coach warn you when a pair is worn out
@@ -91,6 +99,27 @@ CREATE TABLE IF NOT EXISTS workouts (
 
 CREATE INDEX IF NOT EXISTS idx_workouts_activity_date
     ON workouts(activity_type, start_date);
+
+-- Per-set strength log — enables progressive overload tracking across sessions
+CREATE TABLE IF NOT EXISTS strength_sets (
+    id              INTEGER PRIMARY KEY,
+    workout_id      INTEGER NOT NULL REFERENCES workouts(id) ON DELETE CASCADE,
+    exercise_name   TEXT    NOT NULL,           -- 'squat' | 'bench_press' | 'deadlift' | 'pull_up' | ...
+    set_number      INTEGER NOT NULL DEFAULT 1,
+    weight_kg       REAL,                       -- NULL for bodyweight exercises
+    reps            INTEGER,
+    duration_sec    REAL,                       -- for timed holds (plank, wall-sit, etc.)
+    rpe             INTEGER CHECK (rpe BETWEEN 1 AND 10),
+    notes           TEXT,
+    created_at      TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_strength_sets_workout
+    ON strength_sets(workout_id);
+
+CREATE INDEX IF NOT EXISTS idx_strength_sets_exercise
+    ON strength_sets(exercise_name, created_at DESC);
+
 
 -- Running-specific biomechanics per workout
 CREATE TABLE IF NOT EXISTS running_form (
@@ -217,6 +246,60 @@ CREATE INDEX IF NOT EXISTS idx_injury_checks_injury
 
 
 -- =============================================================
+-- LAYER 1c  —  Training Plan  (written by agent, read back each session)
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS planned_workouts (
+    id                     INTEGER PRIMARY KEY,
+    week_start             TEXT    NOT NULL,        -- "YYYY-MM-DD" Monday of the plan week
+    day_date               TEXT    NOT NULL,        -- "YYYY-MM-DD" target session date
+    session_order          INTEGER NOT NULL DEFAULT 1, -- supports two-a-days
+    activity_type          TEXT    NOT NULL,        -- 'running' | 'strength' | 'rest' | 'cross_training'
+    workout_type           TEXT,                    -- 'easy' | 'tempo' | 'interval' | 'long_run' | 'recovery' | 'strength' | 'rest' | 'assessment'
+    description            TEXT    NOT NULL,        -- what to do
+    target_distance_km     REAL,
+    target_duration_min    REAL,
+    intensity              TEXT    CHECK (intensity IN ('easy', 'moderate', 'hard', 'rest')),
+    phase                  TEXT    CHECK (phase IN ('onboarding','base','build','peak','race','recovery','return_to_run')),
+    is_assessment          INTEGER NOT NULL DEFAULT 0,  -- 1 = progress test / physical exam session
+    notes                  TEXT,                    -- coach rationale / cues
+    status                 TEXT    NOT NULL DEFAULT 'planned'
+                           CHECK (status IN ('planned', 'completed', 'skipped', 'modified')),
+    created_at             TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    updated_at             TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_planned_workouts_day_order
+    ON planned_workouts(week_start, day_date, session_order);
+
+CREATE INDEX IF NOT EXISTS idx_planned_workouts_week
+    ON planned_workouts(week_start);
+
+
+-- Fitness assessments: physical exams + periodic progress tests
+-- Onboarding uses assessment_type='onboarding_run' or 'onboarding_strength'.
+-- Recurring tests (every 4–6 wks) use 'time_trial' or 'strength_1rm'.
+CREATE TABLE IF NOT EXISTS fitness_assessments (
+    id               INTEGER PRIMARY KEY,
+    assessment_date  TEXT    NOT NULL,        -- "YYYY-MM-DD"
+    assessment_type  TEXT    NOT NULL,        -- 'onboarding_run' | 'onboarding_strength' | 'time_trial' | 'strength_1rm' | 'cooper_test' | 'body_composition'
+    exercise_name    TEXT,                    -- for strength: 'squat' | 'bench_press' | 'deadlift' | ...
+    metric_name      TEXT    NOT NULL,        -- what was measured: 'time_sec' | 'distance_m' | 'weight_kg' | 'reps' | 'pace_min_per_km'
+    metric_value     REAL    NOT NULL,        -- raw result
+    estimated_vdot   REAL,                    -- derived from running tests
+    estimated_1rm_kg REAL,                    -- derived from strength tests (Epley formula)
+    notes            TEXT,
+    created_at       TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessments_type_date
+    ON fitness_assessments(assessment_type, assessment_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_assessments_exercise
+    ON fitness_assessments(exercise_name, assessment_date DESC);
+
+
+-- =============================================================
 -- LAYER 2  —  Detail  (queried on demand by tool calls)
 -- =============================================================
 
@@ -338,7 +421,6 @@ CREATE TABLE IF NOT EXISTS vdot_paces (
     i_pace_sec          INTEGER,   -- Interval pace
     r_pace_sec          INTEGER    -- Repetition pace
 );
-
 
 -- =============================================================
 -- Convenience view — flattens the most-queried columns.

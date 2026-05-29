@@ -1,5 +1,4 @@
 import sqlite3
-from pathlib import Path
 
 from langchain_core.messages import SystemMessage
 from langchain_ollama import ChatOllama
@@ -10,14 +9,59 @@ from langgraph.prebuilt import ToolNode
 from src.config import config
 from src.models.agent_state import CoachState
 from src.promts.system_promt import build_system_prompt
-from src.tools.rag_tool import search_coaching_books
-from src.tools.sql_tool import query_running_database
-from src.tools.vdot_tool import get_vdot_paces
+from src.tools import (
+    search_coaching_books,
+    query_running_database,
+    get_vdot_paces,
+    get_daily_readiness,
+    get_active_injuries,
+    get_injury_recovery_trend,
+    log_injury,
+    log_injury_checkin,
+    get_recent_workouts,
+    log_workout_rpe_and_notes,
+    save_workout_plan,
+    get_current_workout_plan,
+    update_planned_workout_status,
+    get_nutrition_profile,
+    get_progress_report,
+    log_strength_sets,
+    get_recent_strength_sets,
+    get_onboarding_status,
+    log_fitness_assessment,
+    get_fitness_assessments,
+)
 
-_DB_PATH = Path(__file__).parent.parent.parent / "data" / "personal" / "running.db"
-
-TOOLS = [query_running_database, search_coaching_books, get_vdot_paces]
-
+TOOLS = [
+    # Onboarding & assessment
+    get_onboarding_status,
+    log_fitness_assessment,
+    get_fitness_assessments,
+    # Readiness & health
+    get_daily_readiness,
+    get_vdot_paces,
+    # Injury
+    get_active_injuries,
+    get_injury_recovery_trend,
+    log_injury,
+    log_injury_checkin,
+    # Training history & feedback
+    get_recent_workouts,
+    log_workout_rpe_and_notes,
+    # Strength tracking
+    get_recent_strength_sets,
+    log_strength_sets,
+    # Planning
+    get_current_workout_plan,
+    save_workout_plan,
+    update_planned_workout_status,
+    # Nutrition & progress
+    get_nutrition_profile,
+    get_progress_report,
+    # Research
+    query_running_database,
+    search_coaching_books,
+]
 
 def get_athlete_context() -> str:
     """
@@ -27,7 +71,7 @@ def get_athlete_context() -> str:
     training condition and recent training history.
     """
     try:
-        con = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True) # open in read-only mode
+        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True) # open in read-only mode
         con.row_factory = sqlite3.Row # access columns by name
         
         # Get today's status (most recent daily health record)
