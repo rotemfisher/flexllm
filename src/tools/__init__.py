@@ -11,6 +11,7 @@ from .nutrition_tool import get_nutrition_profile
 from .progress_tool import get_progress_report
 from .strength_tool import log_strength_sets, get_recent_strength_sets
 from .assessment_tool import get_onboarding_status, log_fitness_assessment, get_fitness_assessments
+from .profile_tool import update_athlete_profile
 
 __all__ = [
     # RAG & SQL
@@ -42,4 +43,6 @@ __all__ = [
     "get_onboarding_status",
     "log_fitness_assessment",
     "get_fitness_assessments",
+    # Profile management
+    "update_athlete_profile",
 ]

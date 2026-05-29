@@ -21,7 +21,7 @@ def get_progress_report(weeks: int = 8) -> str:
         con.row_factory = sqlite3.Row
 
         weekly = con.execute(
-            f"""
+            """
             SELECT
                 strftime('%Y-W%W', start_date)           AS week,
                 MIN(substr(start_date, 1, 10))           AS week_from,
@@ -32,10 +32,11 @@ def get_progress_report(weeks: int = 8) -> str:
                 ROUND(AVG(CAST(rpe AS REAL)), 1)         AS avg_rpe,
                 ROUND(SUM(training_stress_score), 0)     AS total_tss
             FROM v_running_overview
-            WHERE start_date >= date('now', '-{weeks} weeks')
+            WHERE start_date >= date('now', ?)
             GROUP BY week
             ORDER BY week DESC
-            """
+            """,
+            (f"-{weeks} weeks",),
         ).fetchall()
 
         fitness = con.execute(
@@ -49,13 +50,14 @@ def get_progress_report(weeks: int = 8) -> str:
         ).fetchone()
 
         injuries = con.execute(
-            f"""
+            """
             SELECT
                 COUNT(*)                                                        AS total,
                 SUM(CASE WHEN status IN ('active','recovering') THEN 1 ELSE 0 END) AS active_count
             FROM injuries
-            WHERE onset_date >= date('now', '-{weeks} weeks')
-            """
+            WHERE onset_date >= date('now', ?)
+            """,
+            (f"-{weeks} weeks",),
         ).fetchone()
 
         lines = [f"=== Progress Report: Last {weeks} Weeks ===\n"]

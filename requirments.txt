@@ -1,4 +1,5 @@
 langgraph
+langgraph-checkpoint-sqlite
 langchain-ollama
 python-dotenv
 pydantic

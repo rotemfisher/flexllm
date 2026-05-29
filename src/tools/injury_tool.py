@@ -76,13 +76,13 @@ def get_injury_recovery_trend(injury_id: int, days: int = 14) -> str:
             return f"Error: injury ID {injury_id} not found. Use get_active_injuries to find IDs."
 
         checks = con.execute(
-            f"""
+            """
             SELECT check_date, pain_scale, pain_context, notes
             FROM injury_checks
-            WHERE injury_id = ? AND check_date >= date('now', '-{days} days')
+            WHERE injury_id = ? AND check_date >= date('now', ?)
             ORDER BY check_date ASC
             """,
-            (injury_id,),
+            (injury_id, f"-{days} days"),
         ).fetchall()
 
         label = (

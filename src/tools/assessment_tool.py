@@ -104,6 +104,8 @@ def log_fitness_assessment(
     metric_name: str,
     metric_value: float,
     exercise_name: str | None = None,
+    distance_km: float | None = None,
+    reps: int | None = None,
     notes: str | None = None,
 ) -> str:
     """
@@ -121,10 +123,12 @@ def log_fitness_assessment(
             'body_composition'    → weight/body-fat snapshot
         metric_name:
             Running: 'time_sec' (time for a fixed distance) | 'pace_min_per_km' | 'distance_m' (for cooper)
-            Strength: 'weight_kg' + pair with reps via notes | 'reps' (for bodyweight max)
+            Strength: 'weight_kg' (pair with reps=) | 'reps' (for bodyweight max)
         metric_value: the raw number (seconds, kg, metres, etc.)
         exercise_name: required for strength assessments (e.g. 'squat', 'bench_press', 'pull_up')
-        notes: any context (e.g. 'distance was 1km', 'reps at 80kg', 'felt tired')
+        distance_km: required when metric_name='time_sec' — the distance covered in km (e.g. 1.0 for a 1km trial)
+        reps: required when metric_name='weight_kg' — number of reps performed for 1RM estimation
+        notes: any additional context (e.g. 'felt tired', 'track surface')
     """
     today = datetime.now().strftime("%Y-%m-%d")
     estimated_vdot = None
@@ -137,19 +141,9 @@ def log_fitness_assessment(
 
         # Auto-compute derived values
         if assessment_type in ("onboarding_run", "time_trial"):
-            if metric_name == "time_sec" and notes:
-                # Try to extract distance from notes (e.g. "distance was 1km" → 1000m)
-                import re
-                km_match = re.search(r"(\d+(?:\.\d+)?)\s*km", notes or "", re.IGNORECASE)
-                m_match  = re.search(r"(\d+(?:\.\d+)?)\s*m\b", notes or "", re.IGNORECASE)
-                if km_match:
-                    dist_m = float(km_match.group(1)) * 1000
-                    pace_sec_per_km = metric_value / (dist_m / 1000)
-                    estimated_vdot = _pace_to_vdot(pace_sec_per_km, con)
-                elif m_match:
-                    dist_m = float(m_match.group(1))
-                    pace_sec_per_km = metric_value / (dist_m / 1000)
-                    estimated_vdot = _pace_to_vdot(pace_sec_per_km, con)
+            if metric_name == "time_sec" and distance_km is not None:
+                pace_sec_per_km = metric_value / distance_km
+                estimated_vdot = _pace_to_vdot(pace_sec_per_km, con)
             elif metric_name == "pace_min_per_km":
                 pace_sec = metric_value * 60
                 estimated_vdot = _pace_to_vdot(pace_sec, con)
@@ -163,10 +157,8 @@ def log_fitness_assessment(
             estimated_vdot = row[0] if row else None
 
         elif assessment_type in ("onboarding_strength", "strength_1rm") and metric_name == "weight_kg":
-            import re
-            reps_match = re.search(r"(\d+)\s*reps?", notes or "", re.IGNORECASE)
-            if reps_match:
-                estimated_1rm_kg = round(_epley_1rm(metric_value, int(reps_match.group(1))), 1)
+            if reps is not None:
+                estimated_1rm_kg = round(_epley_1rm(metric_value, reps), 1)
 
         con.row_factory = None
         con.execute(
