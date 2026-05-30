@@ -10,6 +10,8 @@ from src.agent.coach_agent import build_coach_graph, get_athlete_context
 
 THREAD_ID = "default"
 
+_AGENT_NODES = {"trainer", "physiotherapist", "recovery_coach", "dietitian"}
+
 
 def main() -> None:
     print("Loading FlexLLM Coach (first run loads the embedding model, ~5s)...")
@@ -34,19 +36,21 @@ def main() -> None:
                 print("Goodbye!")
                 break
 
-            print("Coach: ", end="", flush=True)
+            current_agent = None
             for chunk, metadata in graph.stream(
                 {"messages": [("human", user_input)], "athlete_context": athlete_ctx},
                 config=run_config,
                 stream_mode="messages",
             ):
-                if (
-                    metadata.get("langgraph_node") == "agent"
-                    and isinstance(chunk, AIMessageChunk)
-                    and isinstance(chunk.content, str)
-                    and chunk.content
-                ):
-                    print(chunk.content, end="", flush=True)
+                node = metadata.get("langgraph_node")
+                if node in _AGENT_NODES and isinstance(chunk, AIMessageChunk):
+                    if node != current_agent:
+                        if current_agent is not None:
+                            print()
+                        print(f"[{node.replace('_', ' ').title()}]: ", end="", flush=True)
+                        current_agent = node
+                    if isinstance(chunk.content, str) and chunk.content:
+                        print(chunk.content, end="", flush=True)
             print("\n")
 
 

@@ -8,3 +8,4 @@ from typing_extensions import TypedDict
 class CoachState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     athlete_context: str
+    active_agent: str  # "trainer" | "physiotherapist" | "recovery_coach" | "dietitian"
