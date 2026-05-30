@@ -146,3 +146,50 @@ def log_injury_checkin(
     finally:
         if con:
             con.close()
+
+
+@tool
+def resolve_injury(injury_id: int, notes: str | None = None) -> str:
+    """
+    Mark an active injury as resolved/recovered.
+    Call this when the athlete reports they are fully pain-free and the injury has healed.
+
+    Args:
+        injury_id: ID of the injury (from get_active_injuries).
+        notes: optional closing note, e.g. 'fully pain-free after 2 weeks of rest'.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    con = None
+    try:
+        con = sqlite3.connect(config.DB_PATH)
+        row = con.execute(
+            "SELECT body_part, side, status FROM injuries WHERE id = ?", (injury_id,)
+        ).fetchone()
+        if not row:
+            return f"Error: injury ID {injury_id} not found."
+        if row[2] == "resolved":
+            return f"Injury ID {injury_id} is already marked as resolved."
+
+        con.execute(
+            """
+            UPDATE injuries
+            SET status = 'resolved', resolved_date = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (today, injury_id),
+        )
+        if notes:
+            con.execute(
+                """
+                INSERT INTO injury_checks (injury_id, check_date, pain_scale, pain_context, notes)
+                VALUES (?, ?, 0, 'rest', ?)
+                """,
+                (injury_id, today, f"Resolved: {notes}"),
+            )
+        con.commit()
+        return f"Injury resolved: {row[1]} {row[0]} (ID {injury_id}) marked as recovered on {today}."
+    except Exception as exc:
+        return f"Database error: {exc}"
+    finally:
+        if con:
+            con.close()

@@ -3,6 +3,14 @@ from langchain_core.tools import tool
 from src.config import config
 
 
+def _fmt_pace(decimal_min: float | None) -> str:
+    if decimal_min is None:
+        return "N/A"
+    minutes = int(decimal_min)
+    seconds = round((decimal_min - minutes) * 60)
+    return f"{minutes}:{seconds:02d}/km"
+
+
 @tool
 def get_progress_report(weeks: int = 8) -> str:
     """
@@ -91,7 +99,7 @@ def get_progress_report(weeks: int = 8) -> str:
             lines.append(header)
             lines.append("  " + "-" * (len(header) - 2))
             for w in weekly:
-                pace_s = f"{w['avg_pace']:.2f}" if w["avg_pace"] else "  N/A"
+                pace_s = _fmt_pace(w["avg_pace"])
                 hr_s   = f"{w['avg_hr']:.0f}"   if w["avg_hr"]   else "N/A"
                 rpe_s  = f"{w['avg_rpe']:.1f}"  if w["avg_rpe"]  else "N/A"
                 tss_s  = f"{w['total_tss']:.0f}" if w["total_tss"] else "N/A"
@@ -116,7 +124,7 @@ def get_progress_report(weeks: int = 8) -> str:
                 if abs(pace_delta) >= 0.05:
                     direction = "faster" if pace_delta > 0 else "slower"
                     lines.append(
-                        f"Pace trend    : {abs(pace_delta):.2f} min/km {direction} "
+                        f"Pace trend    : {_fmt_pace(abs(pace_delta))} {direction} "
                         f"than {weeks} weeks ago"
                     )
 

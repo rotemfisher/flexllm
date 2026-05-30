@@ -2,8 +2,8 @@ from .rag_tool import search_coaching_books
 from .sql_tool import query_running_database
 from .vdot_tool import get_vdot_paces
 from .readiness_tool import get_daily_readiness
-from .injury_tool import get_active_injuries, get_injury_recovery_trend, resolve_injury
-from .injury_write_tool import log_injury, log_injury_checkin
+from .injury_tool import get_active_injuries, get_injury_recovery_trend
+from .injury_write_tool import log_injury, log_injury_checkin, resolve_injury
 from .workout_history_tool import get_recent_workouts
 from .log_workout_feedback_tool import log_workout_rpe_and_notes
 from .plan_tool import save_workout_plan, get_current_workout_plan, update_planned_workout_status, replace_day_in_plan

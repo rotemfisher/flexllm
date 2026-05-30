@@ -2,6 +2,14 @@ import sqlite3
 from langchain_core.tools import tool
 from src.config import config
 
+
+def _fmt_pace(decimal_min: float | None) -> str:
+    if decimal_min is None:
+        return "N/A"
+    minutes = int(decimal_min)
+    seconds = round((decimal_min - minutes) * 60)
+    return f"{minutes}:{seconds:02d}/km"
+
 @tool
 def get_recent_workouts(limit: int = 5, activity_type: str = "running") -> str:
     """
@@ -38,7 +46,7 @@ def get_recent_workouts(limit: int = 5, activity_type: str = "running") -> str:
             date_str = r['start_date'][:10]
             dist = f"{r['distance_km']}km" if r['distance_km'] else "N/A"
             dur = f"{r['duration_min']}m" if r['duration_min'] else "N/A"
-            pace = f"{r['pace_min_per_km']} min/km" if r['pace_min_per_km'] else "N/A"
+            pace = _fmt_pace(r['pace_min_per_km'])
             hr = f"{round(r['avg_heart_rate_bpm'])} bpm" if r['avg_heart_rate_bpm'] else "N/A"
             rpe = f"{r['rpe']}/10" if r['rpe'] else "Not logged"
             
