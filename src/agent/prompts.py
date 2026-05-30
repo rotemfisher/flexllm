@@ -81,9 +81,9 @@ ASSESSMENT & PROGRESS:
 - Progress review → get_fitness_assessments + get_progress_report.
 
 HANDOFF TRIGGERS:
-- Athlete reports pain, injury, or movement limitation → transfer_to_physiotherapist.
-- TSB < -20, HRV alarm, fatigue-only topic → transfer_to_recovery_coach.
-- Nutrition, meal plan, macros, weight → transfer_to_dietitian.
+- Athlete reports pain, injury, or movement limitation → trainer_transfer(target="physiotherapist").
+- TSB < -20, HRV alarm, fatigue-only topic → trainer_transfer(target="recovery_coach").
+- Nutrition, meal plan, macros, weight → trainer_transfer(target="dietitian").
 """
 
 
@@ -135,9 +135,9 @@ REFERENCE MATERIAL:
 - search_coaching_books(book_filter='physiology') or 'daniels' for return-to-run protocols.
 
 HANDOFF TRIGGERS:
-- Injury addressed and athlete cleared → physio_transfer_to_trainer with full return protocol in reason.
-- Accumulated fatigue is root cause → physio_transfer_to_recovery_coach.
-- Dietary support needed (collagen, anti-inflammatory) → physio_transfer_to_dietitian.
+- Injury addressed and athlete cleared → physio_transfer(target="trainer") with full return protocol in reason.
+- Accumulated fatigue is root cause → physio_transfer(target="recovery_coach").
+- Dietary support needed (collagen, anti-inflammatory) → physio_transfer(target="dietitian").
 """
 
 
@@ -178,9 +178,9 @@ TOOL RULES
 - Science reference: search_coaching_books(book_filter='physiology') for HRV or periodisation content.
 
 HANDOFF TRIGGERS:
-- Pain or injury suspected as driver of poor recovery → recovery_transfer_to_physiotherapist.
-- Caloric deficit or fuelling issue driving poor recovery → recovery_transfer_to_dietitian.
-- Load managed, athlete wants to discuss training → recovery_transfer_to_trainer.
+- Pain or injury suspected as driver of poor recovery → recovery_transfer(target="physiotherapist").
+- Caloric deficit or fuelling issue driving poor recovery → recovery_transfer(target="dietitian").
+- Load managed, athlete wants to discuss training → recovery_transfer(target="trainer").
 """
 
 
@@ -229,9 +229,9 @@ TOOL RULES
 - Custom caloric queries: query_running_database (e.g. avg active calories by week).
 
 HANDOFF TRIGGERS:
-- Athlete asks about training, paces, or workout planning → dietitian_transfer_to_trainer.
-- Dietary topic intersects with injury (collagen, bone health) → dietitian_transfer_to_physiotherapist.
-- Nutrition question related to sleep or HRV → dietitian_transfer_to_recovery_coach.
+- Athlete asks about training, paces, or workout planning → dietitian_transfer(target="trainer").
+- Dietary topic intersects with injury (collagen, bone health) → dietitian_transfer(target="physiotherapist").
+- Nutrition question related to sleep or HRV → dietitian_transfer(target="recovery_coach").
 """
 
 

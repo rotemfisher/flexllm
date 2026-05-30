@@ -6,11 +6,7 @@ from src.tools import (
     search_coaching_books,
     query_running_database,
 )
-from src.agent.handoffs import (
-    dietitian_transfer_to_trainer,
-    dietitian_transfer_to_physiotherapist,
-    dietitian_transfer_to_recovery_coach,
-)
+from src.agent.handoffs import dietitian_transfer
 
 DIETITIAN_TOOLS = [
     get_nutrition_profile,
@@ -19,7 +15,5 @@ DIETITIAN_TOOLS = [
     update_athlete_profile,
     search_coaching_books,
     query_running_database,
-    dietitian_transfer_to_trainer,
-    dietitian_transfer_to_physiotherapist,
-    dietitian_transfer_to_recovery_coach,
+    dietitian_transfer,
 ]

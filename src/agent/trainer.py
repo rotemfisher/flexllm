@@ -16,11 +16,7 @@ from src.tools import (
     search_coaching_books,
     query_running_database,
 )
-from src.agent.handoffs import (
-    transfer_to_physiotherapist,
-    transfer_to_recovery_coach,
-    transfer_to_dietitian,
-)
+from src.agent.handoffs import trainer_transfer
 
 TRAINER_TOOLS = [
     get_onboarding_status,
@@ -39,7 +35,5 @@ TRAINER_TOOLS = [
     update_athlete_profile,
     search_coaching_books,
     query_running_database,
-    transfer_to_physiotherapist,
-    transfer_to_recovery_coach,
-    transfer_to_dietitian,
+    trainer_transfer,
 ]

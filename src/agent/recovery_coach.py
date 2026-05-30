@@ -7,11 +7,7 @@ from src.tools import (
     get_progress_report,
     search_coaching_books,
 )
-from src.agent.handoffs import (
-    recovery_transfer_to_trainer,
-    recovery_transfer_to_physiotherapist,
-    recovery_transfer_to_dietitian,
-)
+from src.agent.handoffs import recovery_transfer
 
 RECOVERY_TOOLS = [
     get_daily_readiness,
@@ -21,7 +17,5 @@ RECOVERY_TOOLS = [
     update_planned_workout_status,
     get_progress_report,
     search_coaching_books,
-    recovery_transfer_to_trainer,
-    recovery_transfer_to_physiotherapist,
-    recovery_transfer_to_dietitian,
+    recovery_transfer,
 ]

@@ -10,11 +10,7 @@ from src.tools import (
     update_planned_workout_status,
     search_coaching_books,
 )
-from src.agent.handoffs import (
-    physio_transfer_to_trainer,
-    physio_transfer_to_recovery_coach,
-    physio_transfer_to_dietitian,
-)
+from src.agent.handoffs import physio_transfer
 
 PHYSIO_TOOLS = [
     get_active_injuries,
@@ -27,7 +23,5 @@ PHYSIO_TOOLS = [
     replace_day_in_plan,
     update_planned_workout_status,
     search_coaching_books,
-    physio_transfer_to_trainer,
-    physio_transfer_to_recovery_coach,
-    physio_transfer_to_dietitian,
+    physio_transfer,
 ]

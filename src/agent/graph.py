@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -20,13 +20,65 @@ from src.agent.prompts import (
 )
 from src.agent.router import route_entry
 
+# Names of the four handoff tools — used by the conflict resolver.
+_HANDOFF_TOOL_NAMES = frozenset({
+    "trainer_transfer",
+    "physio_transfer",
+    "recovery_transfer",
+    "dietitian_transfer",
+})
+
+# Keep at most this many messages in the context window sent to the LLM.
+# Enough to cover several back-and-forth exchanges while staying well within
+# Qwen 30B's NUM_CTX=16384 token budget.
+_MAX_HISTORY_MESSAGES = 30
+
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
+def _trim_messages(messages: list[BaseMessage], max_messages: int = _MAX_HISTORY_MESSAGES) -> list[BaseMessage]:
+    """Return the most recent up-to-max_messages messages.
+
+    Never starts the resulting slice with a ToolMessage: an orphaned tool
+    result (without its AIMessage parent that contains tool_calls) confuses
+    the Ollama chat format and can cause an API error.
+    """
+    if len(messages) <= max_messages:
+        return messages
+    trimmed = list(messages[-max_messages:])
+    # Walk forward until we're past any orphaned ToolMessages at the head.
+    while trimmed and isinstance(trimmed[0], ToolMessage):
+        trimmed = trimmed[1:]
+    return trimmed
+
+
+def _resolve_tool_conflicts(response) -> object:
+    """If the LLM returns a handoff tool call mixed with domain tool calls,
+    discard the domain calls and keep only the handoff.
+
+    LLMs occasionally ignore the 'handoff must be the only tool call'
+    instruction. Keeping both would send a ToolMessage back to the ToolNode
+    alongside a Command, which LangGraph handles unpredictably.
+    """
+    tool_calls = getattr(response, "tool_calls", None)
+    if not tool_calls or len(tool_calls) <= 1:
+        return response
+    handoffs = [tc for tc in tool_calls if tc["name"] in _HANDOFF_TOOL_NAMES]
+    if not handoffs:
+        return response  # Multiple domain calls — fine, no conflict.
+    # Conflict detected: keep only the first handoff, drop domain calls.
+    return response.model_copy(update={"tool_calls": handoffs[:1]})
+
+
 # ── Agent node factory ────────────────────────────────────────────────────────
 
 def _make_agent_node(llm_with_tools, prompt_builder):
     def call_model(state: CoachState) -> dict:
         system_prompt = prompt_builder(state.get("athlete_context", ""))
-        messages = [SystemMessage(content=system_prompt)] + list(state["messages"])
+        history = _trim_messages(list(state["messages"]))
+        messages = [SystemMessage(content=system_prompt)] + history
         response = llm_with_tools.invoke(messages)
+        response = _resolve_tool_conflicts(response)
         return {"messages": [response]}
     return call_model
 

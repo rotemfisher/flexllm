@@ -1,95 +1,96 @@
+from typing import Literal
+
 from langchain_core.tools import tool
 from langgraph.types import Command
 
 
-# ── FROM TRAINER ──────────────────────────────────────────────────────────────
-
 @tool
-def transfer_to_physiotherapist(reason: str) -> Command:
-    """Transfer to the Physiotherapist. Use when the athlete reports pain, injury,
-    or movement contraindications that require specialist assessment."""
-    return Command(goto="physiotherapist", update={"active_agent": "physiotherapist"})
+def trainer_transfer(
+    target: Literal["physiotherapist", "recovery_coach", "dietitian"],
+    reason: str,
+) -> Command:
+    """
+    HANDOFF — transfer control from the Trainer to another specialist.
 
+    CRITICAL: Call this as the LAST and ONLY tool in your response.
+    NEVER combine this with a domain tool (get_recent_workouts, save_workout_plan,
+    get_vdot_paces, etc.) in the same turn.
+    Complete all data-gathering and analysis first, THEN call this tool alone.
 
-@tool
-def transfer_to_recovery_coach(reason: str) -> Command:
-    """Transfer to the Recovery Coach. Use when TSB < -20, HRV is critically low,
-    sleep is under 5h, or the athlete is asking about fatigue or load management."""
-    return Command(goto="recovery_coach", update={"active_agent": "recovery_coach"})
+    target — choose exactly one string:
+      "physiotherapist"  : athlete reports pain, injury, or movement limitation
+      "recovery_coach"   : TSB < -20, HRV critically low, sleep < 5h, or fatigue-only topic
+      "dietitian"        : nutrition, meal planning, macros, weight management, fuelling
 
-
-@tool
-def transfer_to_dietitian(reason: str) -> Command:
-    """Transfer to the Dietitian. Use when the athlete asks about nutrition,
-    meal planning, macros, weight management, or fuelling strategy."""
-    return Command(goto="dietitian", update={"active_agent": "dietitian"})
-
-
-# ── FROM PHYSIOTHERAPIST ──────────────────────────────────────────────────────
-
-@tool
-def physio_transfer_to_trainer(reason: str) -> Command:
-    """Return control to the Trainer. Use after the injury has been addressed
-    and it is safe to resume or modify training — include the return-to-train
-    protocol in the reason so the Trainer can rebuild the plan accordingly."""
-    return Command(goto="trainer", update={"active_agent": "trainer"})
+    reason — concise handoff note for the receiving agent (key values, clinical context).
+    """
+    return Command(goto=target, update={"active_agent": target})
 
 
 @tool
-def physio_transfer_to_recovery_coach(reason: str) -> Command:
-    """Transfer to the Recovery Coach. Use when fatigue or accumulated load
-    appears to be the root cause of the injury or is slowing recovery."""
-    return Command(goto="recovery_coach", update={"active_agent": "recovery_coach"})
+def physio_transfer(
+    target: Literal["trainer", "recovery_coach", "dietitian"],
+    reason: str,
+) -> Command:
+    """
+    HANDOFF — transfer control from the Physiotherapist to another specialist.
+
+    CRITICAL: Call this as the LAST and ONLY tool in your response.
+    NEVER combine this with a domain tool (get_active_injuries, log_injury_checkin,
+    save_workout_plan, etc.) in the same turn.
+    Complete all injury assessment work first, THEN call this tool alone.
+
+    target — choose exactly one string:
+      "trainer"          : injury resolved, athlete cleared — include return-to-train protocol in reason
+      "recovery_coach"   : accumulated fatigue is the root cause of the injury
+      "dietitian"        : dietary support needed (collagen synthesis, anti-inflammatory nutrition)
+
+    reason — handoff note with return-to-train restrictions or clinical context for the receiving agent.
+    """
+    return Command(goto=target, update={"active_agent": target})
 
 
 @tool
-def physio_transfer_to_dietitian(reason: str) -> Command:
-    """Transfer to the Dietitian. Use when the injury management requires
-    dietary support (collagen synthesis, anti-inflammatory nutrition)."""
-    return Command(goto="dietitian", update={"active_agent": "dietitian"})
+def recovery_transfer(
+    target: Literal["trainer", "physiotherapist", "dietitian"],
+    reason: str,
+) -> Command:
+    """
+    HANDOFF — transfer control from the Recovery Coach to another specialist.
 
+    CRITICAL: Call this as the LAST and ONLY tool in your response.
+    NEVER combine this with a domain tool (get_daily_readiness, update_planned_workout_status,
+    get_current_workout_plan, etc.) in the same turn.
+    Complete readiness assessment first, THEN call this tool alone.
 
-# ── FROM RECOVERY COACH ───────────────────────────────────────────────────────
+    target — choose exactly one string:
+      "trainer"          : readiness assessed, session modification determined, back to training
+      "physiotherapist"  : fatigue symptoms may indicate an underlying injury
+      "dietitian"        : under-fuelling or caloric deficit is driving poor recovery
 
-@tool
-def recovery_transfer_to_trainer(reason: str) -> Command:
-    """Return to the Trainer. Use after the readiness assessment is complete
-    and the appropriate session intensity or modification has been determined."""
-    return Command(goto="trainer", update={"active_agent": "trainer"})
-
-
-@tool
-def recovery_transfer_to_physiotherapist(reason: str) -> Command:
-    """Transfer to the Physiotherapist. Use when fatigue symptoms may indicate
-    an underlying injury rather than normal training stress."""
-    return Command(goto="physiotherapist", update={"active_agent": "physiotherapist"})
-
-
-@tool
-def recovery_transfer_to_dietitian(reason: str) -> Command:
-    """Transfer to the Dietitian. Use when poor recovery appears driven by
-    under-fuelling, caloric deficit, or inadequate sleep nutrition."""
-    return Command(goto="dietitian", update={"active_agent": "dietitian"})
-
-
-# ── FROM DIETITIAN ────────────────────────────────────────────────────────────
-
-@tool
-def dietitian_transfer_to_trainer(reason: str) -> Command:
-    """Return to the Trainer. Use after the nutrition plan is set and the
-    athlete has questions about training, paces, or workout planning."""
-    return Command(goto="trainer", update={"active_agent": "trainer"})
+    reason — handoff note with TSB, HRV, and sleep values plus clinical rationale.
+    """
+    return Command(goto=target, update={"active_agent": target})
 
 
 @tool
-def dietitian_transfer_to_physiotherapist(reason: str) -> Command:
-    """Transfer to the Physiotherapist. Use when a dietary topic intersects
-    with injury (e.g. bone stress, tendon health, anti-inflammatory protocol)."""
-    return Command(goto="physiotherapist", update={"active_agent": "physiotherapist"})
+def dietitian_transfer(
+    target: Literal["trainer", "physiotherapist", "recovery_coach"],
+    reason: str,
+) -> Command:
+    """
+    HANDOFF — transfer control from the Dietitian to another specialist.
 
+    CRITICAL: Call this as the LAST and ONLY tool in your response.
+    NEVER combine this with a domain tool (get_nutrition_profile, update_athlete_profile,
+    get_recent_workouts, etc.) in the same turn.
+    Complete all nutritional assessment first, THEN call this tool alone.
 
-@tool
-def dietitian_transfer_to_recovery_coach(reason: str) -> Command:
-    """Transfer to the Recovery Coach. Use when nutrition questions relate to
-    sleep quality, HRV, or overall recovery capacity."""
-    return Command(goto="recovery_coach", update={"active_agent": "recovery_coach"})
+    target — choose exactly one string:
+      "trainer"          : nutrition plan set, athlete has training or workout questions
+      "physiotherapist"  : dietary topic intersects with injury (bone stress, tendon, inflammation)
+      "recovery_coach"   : nutrition question relates to sleep quality, HRV, or recovery capacity
+
+    reason — handoff note with nutritional context and recommendations already provided.
+    """
+    return Command(goto=target, update={"active_agent": target})
