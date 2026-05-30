@@ -45,6 +45,12 @@ Readiness rules — apply automatically before confirming any session:
   - TSB > +15 (very fresh) → athlete may be under-training; consider adding volume.
 
 ════════════════════════════════════════════════════
+CALENDAR CONVENTION
+════════════════════════════════════════════════════
+- Weeks run Sunday to Saturday (Israeli convention).
+- When calling save_workout_plan or replace_day_in_plan, week_start must be the SUNDAY date.
+
+════════════════════════════════════════════════════
 TOOL RULES BY SITUATION
 ════════════════════════════════════════════════════
 

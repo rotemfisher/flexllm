@@ -12,7 +12,7 @@ def save_workout_plan(week_start: str, sessions: str) -> str:
     Call this after generating a workout plan for the athlete.
 
     Args:
-        week_start: The Monday of the plan week in 'YYYY-MM-DD' format.
+        week_start: The Sunday that starts the plan week in 'YYYY-MM-DD' format.
         sessions: JSON array string where each object has:
             Required:
               - day_date (str, YYYY-MM-DD)
@@ -98,7 +98,8 @@ def get_current_workout_plan() -> str:
     """
     today = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now()
-    week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    # Week starts on Sunday (Israeli convention). weekday(): Mon=0…Sat=5, Sun=6
+    week_start = (now - timedelta(days=(now.weekday() + 1) % 7)).strftime("%Y-%m-%d")
 
     con = None
     try:
@@ -150,6 +151,69 @@ def get_current_workout_plan() -> str:
             )
         return "\n\n".join(lines)
 
+    except Exception as exc:
+        return f"Database error: {exc}"
+    finally:
+        if con:
+            con.close()
+
+
+@tool
+def replace_day_in_plan(week_start: str, day_date: str, sessions: str) -> str:
+    """
+    Replace all sessions for a single day within an existing weekly plan.
+    Use this to adjust, swap, or add a session for one day without
+    rewriting the entire week.
+
+    Args:
+        week_start: The Sunday that starts the plan week in 'YYYY-MM-DD' format.
+        day_date: The specific day to update in 'YYYY-MM-DD' format.
+        sessions: JSON array of session objects — same schema as save_workout_plan.
+    """
+    try:
+        plan = json.loads(sessions)
+    except json.JSONDecodeError as exc:
+        return f"Error: sessions must be a valid JSON array. {exc}"
+
+    required = {"activity_type", "workout_type", "description", "intensity"}
+    for i, s in enumerate(plan):
+        missing = required - s.keys()
+        if missing:
+            return f"Error: session {i} is missing required fields: {sorted(missing)}"
+
+    con = None
+    try:
+        con = sqlite3.connect(config.DB_PATH)
+        con.execute(
+            "DELETE FROM planned_workouts WHERE week_start = ? AND day_date = ?",
+            (week_start, day_date),
+        )
+        for order, s in enumerate(plan, start=1):
+            con.execute(
+                """
+                INSERT INTO planned_workouts
+                    (week_start, day_date, session_order, activity_type, workout_type,
+                     description, target_distance_km, target_duration_min,
+                     intensity, phase, is_assessment, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    week_start,
+                    day_date,
+                    s.get("session_order", order),
+                    s["activity_type"],
+                    s["workout_type"],
+                    s["description"],
+                    s.get("target_distance_km"),
+                    s.get("target_duration_min"),
+                    s["intensity"],
+                    s.get("phase"),
+                    int(s.get("is_assessment", 0)),
+                    s.get("notes"),
+                ),
+            )
+        con.commit()
+        return f"Updated {len(plan)} session(s) for {day_date} in the week of {week_start}."
     except Exception as exc:
         return f"Database error: {exc}"
     finally:

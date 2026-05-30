@@ -1,5 +1,4 @@
 import sqlite3
-import json
 from langchain_core.tools import tool
 from src.config import config
 
@@ -19,9 +18,9 @@ def get_recent_workouts(limit: int = 5, activity_type: str = "running") -> str:
         con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
 
-        rows = [dict(r) for r in con.execute(
+        rows = con.execute(
             """
-            SELECT start_date, duration_min, distance_km,
+            SELECT id, start_date, duration_min, distance_km,
                    ROUND(duration_min / NULLIF(distance_km, 0), 2) AS pace_min_per_km,
                    avg_heart_rate_bpm, training_stress_score, rpe
             FROM workouts
@@ -29,9 +28,23 @@ def get_recent_workouts(limit: int = 5, activity_type: str = "running") -> str:
             ORDER BY start_date DESC LIMIT ?
             """,
             (activity_type, limit)
-        ).fetchall()]
+        ).fetchall()
 
-        return json.dumps(rows, default=str) if rows else f"No recent {activity_type} workouts found."
+        if not rows:
+            return f"No recent {activity_type} workouts found."
+
+        report = f"--- Recent {activity_type.capitalize()} Workouts ---\n"
+        for r in rows:
+            date_str = r['start_date'][:10]
+            dist = f"{r['distance_km']}km" if r['distance_km'] else "N/A"
+            dur = f"{r['duration_min']}m" if r['duration_min'] else "N/A"
+            pace = f"{r['pace_min_per_km']} min/km" if r['pace_min_per_km'] else "N/A"
+            hr = f"{round(r['avg_heart_rate_bpm'])} bpm" if r['avg_heart_rate_bpm'] else "N/A"
+            rpe = f"{r['rpe']}/10" if r['rpe'] else "Not logged"
+            
+            report += f"- {date_str} [ID: {r['id']}]: {dist} in {dur} | Pace: {pace} | HR: {hr} | RPE: {rpe}\n"
+
+        return report
 
     except Exception as exc:
         return f"Database error: {exc}"

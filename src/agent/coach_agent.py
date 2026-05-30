@@ -17,12 +17,14 @@ from src.tools import (
     get_daily_readiness,
     get_active_injuries,
     get_injury_recovery_trend,
+    resolve_injury,
     log_injury,
     log_injury_checkin,
     get_recent_workouts,
     log_workout_rpe_and_notes,
     save_workout_plan,
     get_current_workout_plan,
+    replace_day_in_plan,
     update_planned_workout_status,
     get_nutrition_profile,
     get_progress_report,
@@ -45,6 +47,7 @@ TOOLS = [
     # Injury
     get_active_injuries,
     get_injury_recovery_trend,
+    resolve_injury,
     log_injury,
     log_injury_checkin,
     # Training history & feedback
@@ -56,6 +59,7 @@ TOOLS = [
     # Planning
     get_current_workout_plan,
     save_workout_plan,
+    replace_day_in_plan,
     update_planned_workout_status,
     # Nutrition & progress
     get_nutrition_profile,
