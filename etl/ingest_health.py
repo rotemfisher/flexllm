@@ -22,12 +22,15 @@ Usage:
 """
 
 import argparse
+import logging
 import math
 import sqlite3
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +95,20 @@ DAILY_SCALAR_TYPES: dict[str, str] = {
     "HKQuantityTypeIdentifierRespiratoryRate":            "respiratory_rate_rpm",
     "HKQuantityTypeIdentifierWalkingHeartRateAverage":    "walking_hr_avg_bpm",
     "HKQuantityTypeIdentifierHeartRateRecoveryOneMinute": "hr_recovery_1min_bpm",
+}
+
+# Pre-build per-column UPDATE SQL at module load time to avoid f-string
+# interpolation at runtime.  Column names come from the controlled dict above,
+# so this is safe — but pre-building makes the SQL auditable and avoids the
+# pattern entirely in hot paths.
+_DAILY_SCALAR_UPDATE: dict[str, str] = {
+    col: f"UPDATE daily_health SET {col} = ? WHERE date = ? AND {col} IS NULL"
+    for col in DAILY_SCALAR_TYPES.values()
+}
+
+_RING_COLUMN_UPDATE: dict[str, str] = {
+    col: f"UPDATE daily_health SET {col} = ? WHERE date = ? AND {col} IS NULL"
+    for col in ("active_calories", "exercise_min", "stand_hours")
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -160,7 +177,7 @@ class HealthIngester:
         self.con.execute("PRAGMA synchronous   = NORMAL")
         self.con.execute("PRAGMA cache_size    = -64000")  # 64 MB
         self._init_db()
-        # Re-disable FK after schema (schema.sql turns them on)
+        # Disable FK during bulk ingestion for speed; re-enabled in run() finally block.
         self.con.execute("PRAGMA foreign_keys = OFF")
 
         self.counts: dict[str, int] = dict.fromkeys(
@@ -402,10 +419,7 @@ class HealthIngester:
                 "INSERT OR IGNORE INTO daily_health (date) VALUES (?)", (date,)
             )
             # Keep the first (earliest) value per day per column
-            self.con.execute(
-                f"UPDATE daily_health SET {col} = ? WHERE date = ? AND {col} IS NULL",
-                (val, date),
-            )
+            self.con.execute(_DAILY_SCALAR_UPDATE[col], (val, date))
 
     def _on_activity_summary(self, elem) -> None:
         date = elem.get("dateComponents")
@@ -435,21 +449,19 @@ class HealthIngester:
         self.con.execute(
             "INSERT OR IGNORE INTO daily_health (date) VALUES (?)", (date,)
         )
+        stand_val = int(st) if st is not None else None
         for col, val in [
             ("active_calories", ac),
             ("exercise_min",    ex),
-            ("stand_hours",     int(st) if st is not None else None),
+            ("stand_hours",     stand_val),
         ]:
             if val is not None:
-                self.con.execute(
-                    f"UPDATE daily_health SET {col} = ? WHERE date = ? AND {col} IS NULL",
-                    (val, date),
-                )
+                self.con.execute(_RING_COLUMN_UPDATE[col], (val, date))
 
     # ── XML streaming ─────────────────────────────────────────────────────────
 
     def _stream_xml(self) -> None:
-        print(f"Streaming {self.xml.name} …")
+        logger.info("Streaming %s …", self.xml.name)
         inside_workout = False
         n = 0
 
@@ -484,20 +496,22 @@ class HealthIngester:
                 n += 1
                 if n % 200_000 == 0:
                     self.con.commit()
-                    print(
-                        f"  {n:,} elements | "
-                        f"workouts={self.counts['workouts']}  "
-                        f"sleep={self.counts['sleep']}  "
-                        f"health_rec={self.counts['health_rec']}"
+                    logger.info(
+                        "  %s elements | workouts=%d  sleep=%d  health_rec=%d",
+                        f"{n:,}",
+                        self.counts["workouts"],
+                        self.counts["sleep"],
+                        self.counts["health_rec"],
                     )
 
         self.con.commit()
-        print(
-            f"XML done.  {n:,} elements\n"
-            f"  workouts={self.counts['workouts']}  laps={self.counts['laps']}  "
-            f"running_form={self.counts['running_form']}\n"
-            f"  sleep={self.counts['sleep']}  health_rec={self.counts['health_rec']}  "
-            f"activity_rings={self.counts['activity_rings']}"
+        logger.info(
+            "XML done.  %s elements\n"
+            "  workouts=%d  laps=%d  running_form=%d\n"
+            "  sleep=%d  health_rec=%d  activity_rings=%d",
+            f"{n:,}",
+            self.counts["workouts"], self.counts["laps"], self.counts["running_form"],
+            self.counts["sleep"], self.counts["health_rec"], self.counts["activity_rings"],
         )
 
     # ── GPX streaming ─────────────────────────────────────────────────────────
@@ -507,7 +521,7 @@ class HealthIngester:
         rows = self.con.execute(
             "SELECT id, gpx_file_path FROM workouts WHERE gpx_file_path IS NOT NULL"
         ).fetchall()
-        print(f"\nParsing {len(rows)} GPX files …")
+        logger.info("Parsing %d GPX files …", len(rows))
 
         FLUSH = 2000
         batch: list = []
@@ -538,7 +552,7 @@ class HealthIngester:
                         batch = []
 
         self._flush_gps(batch)
-        print(f"GPS tracks: {self.counts['gps_tracks']:,}")
+        logger.info("GPS tracks: %s", f"{self.counts['gps_tracks']:,}")
 
     def _flush_gps(self, batch: list) -> None:
         if not batch:
@@ -555,14 +569,17 @@ class HealthIngester:
     # ── Training stress score (TRIMP) ─────────────────────────────────────────
 
     def _compute_tss(self) -> None:
-        print("\nComputing TSS (TRIMP) …")
+        logger.info("Computing TSS (TRIMP) …")
         profile = self.con.execute(
             "SELECT date_of_birth FROM athlete_profile LIMIT 1"
         ).fetchone()
         max_hr = 190.0
         if profile and profile[0]:
             try:
-                max_hr = float(220 - (2026 - int(profile[0][:4])))
+                current_year = datetime.now(timezone.utc).year
+                age = current_year - int(profile[0][:4])
+                # Tanaka formula is more accurate than the classic 220-age
+                max_hr = 208.0 - 0.7 * age
             except Exception:
                 pass
 
@@ -589,12 +606,12 @@ class HealthIngester:
                 "UPDATE workouts SET training_stress_score = ? WHERE id = ?", updates
             )
             self.con.commit()
-        print(f"TSS set on {len(updates)} workouts.")
+        logger.info("TSS set on %d workouts.", len(updates))
 
     # ── daily_health aggregation ──────────────────────────────────────────────
 
     def _aggregate_daily(self) -> None:
-        print("\nAggregating daily_health …")
+        logger.info("Aggregating daily_health …")
         self.con.executescript(
             """
             -- Sleep totals per night
@@ -640,7 +657,7 @@ class HealthIngester:
     # ── ATL / CTL / TSB ──────────────────────────────────────────────────────
 
     def _compute_load(self) -> None:
-        print("Computing ATL / CTL / TSB …")
+        logger.info("Computing ATL / CTL / TSB …")
         rows = self.con.execute(
             "SELECT date, daily_tss FROM daily_health ORDER BY date"
         ).fetchall()
@@ -659,25 +676,34 @@ class HealthIngester:
             "UPDATE daily_health SET atl=?, ctl=?, tsb=? WHERE date=?", ups
         )
         self.con.commit()
-        print(f"Training load computed for {len(ups)} days.")
+        logger.info("Training load computed for %d days.", len(ups))
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        self._stream_xml()
-        self._stream_gpx()
-        self._compute_tss()
-        self._aggregate_daily()
-        self._compute_load()
-        self.con.execute("PRAGMA foreign_keys = ON")
-        self.con.commit()
-        self.con.close()
-        print("\nIngestion complete.")
+        try:
+            self._stream_xml()
+            self._stream_gpx()
+            self._compute_tss()
+            self._aggregate_daily()
+            self._compute_load()
+        finally:
+            # Always re-enable FK enforcement and close the connection, even on error.
+            self.con.execute("PRAGMA foreign_keys = ON")
+            self.con.commit()
+            self.con.close()
+        logger.info("Ingestion complete.")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     p = argparse.ArgumentParser(description="Stream Apple Health Export XML → SQLite")
     p.add_argument("--xml",        type=Path, default=XML_FILE,    metavar="PATH")
     p.add_argument("--db",         type=Path, default=DB_PATH,     metavar="PATH")

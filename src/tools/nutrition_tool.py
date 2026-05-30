@@ -1,6 +1,7 @@
-import sqlite3
 from langchain_core.tools import tool
-from src.config import config
+
+from src.tools._utils import db_ro
+
 
 @tool
 def get_nutrition_profile() -> str:
@@ -9,31 +10,28 @@ def get_nutrition_profile() -> str:
     The Dietitian role MUST call this tool before generating any meal plans, macro recommendations,
     or diet advice, to ensure the plan is personalized to their height, weight, sex, and activity level.
     """
-    con = None
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
+        with db_ro() as con:
+            profile = con.execute(
+                "SELECT date_of_birth, biological_sex, height_cm, current_goal, target_weight_kg, dietary_pref FROM athlete_profile ORDER BY id DESC LIMIT 1"
+            ).fetchone()
 
-        profile = con.execute(
-            "SELECT date_of_birth, biological_sex, height_cm, current_goal, target_weight_kg, dietary_pref FROM athlete_profile ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+            if not profile:
+                return "Athlete profile is missing. Ask the athlete for their age, height, sex, and nutrition goals."
 
-        if not profile:
-            return "Athlete profile is missing. Ask the athlete for their age, height, sex, and nutrition goals."
+            health = con.execute(
+                "SELECT body_mass_kg FROM daily_health WHERE body_mass_kg IS NOT NULL ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+            current_weight = health["body_mass_kg"] if health else "Unknown"
 
-        health = con.execute(
-            "SELECT body_mass_kg FROM daily_health WHERE body_mass_kg IS NOT NULL ORDER BY date DESC LIMIT 1"
-        ).fetchone()
-        current_weight = health['body_mass_kg'] if health else "Unknown"
-
-        activity = con.execute(
-            """
-            SELECT AVG(active_calories) as avg_active_cals
-            FROM daily_health
-            WHERE date >= date('now', '-7 days') AND active_calories IS NOT NULL
-            """
-        ).fetchone()
-        avg_active_cals = round(activity['avg_active_cals'] or 0)
+            activity = con.execute(
+                """
+                SELECT AVG(active_calories) as avg_active_cals
+                FROM daily_health
+                WHERE date >= date('now', '-7 days') AND active_calories IS NOT NULL
+                """
+            ).fetchone()
+            avg_active_cals = round(activity["avg_active_cals"] or 0)
 
         return (
             f"--- Athlete Nutrition Profile ---\n"
@@ -55,6 +53,3 @@ def get_nutrition_profile() -> str:
 
     except Exception as exc:
         return f"Database error: {exc}"
-    finally:
-        if con:
-            con.close()

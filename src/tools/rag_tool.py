@@ -1,17 +1,26 @@
-from sentence_transformers import SentenceTransformer, CrossEncoder
+import threading
+
 from fastembed import SparseTextEmbedding
+from langchain_core.tools import tool
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
-    Filter, FieldCondition, MatchValue,
-    Prefetch, Fusion, SparseVector,
+    FieldCondition,
+    Filter,
+    Fusion,
+    MatchValue,
+    Prefetch,
+    SparseVector,
 )
-from langchain_core.tools import tool
+from sentence_transformers import CrossEncoder, SentenceTransformer
+
 from src.config import config
 
 _SPARSE_MODEL = "Qdrant/bm25"
 _RERANK_MODEL = "BAAI/bge-reranker-large"
 
-# Loaded once per process
+# Loaded once per process; protected by a lock to prevent double-initialization
+# in multi-threaded LangChain runtimes.
+_lock         = threading.Lock()
 _client       = None
 _dense_model  = None
 _sparse_model = None
@@ -21,10 +30,12 @@ _rerank_model = None
 def _get_models():
     global _client, _dense_model, _sparse_model, _rerank_model
     if _client is None:
-        _client       = QdrantClient(path=config.QDRANT_PATH)
-        _dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
-        _sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
-        _rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
+        with _lock:
+            if _client is None:  # double-checked locking
+                _client       = QdrantClient(path=config.QDRANT_PATH)
+                _dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
+                _sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
+                _rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
     return _client, _dense_model, _sparse_model, _rerank_model
 
 

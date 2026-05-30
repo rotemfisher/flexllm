@@ -8,27 +8,41 @@ Re-run is safe — skips books already embedded (checks by book key).
 No API key needed: embeddings run locally via sentence-transformers + fastembed.
 """
 
+import logging
 import re
 import uuid
 from pathlib import Path
 
+import pypdfium2 as pdfium
 import tiktoken
-from sentence_transformers import SentenceTransformer
-from fastembed import SparseTextEmbedding
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance, VectorParams, SparseVectorParams, SparseIndexParams,
-    PointStruct, SparseVector,
-    Filter, FieldCondition, MatchValue, FilterSelector,
+import torch
+from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import (
+    AcceleratorDevice,
+    AcceleratorOptions,
+    PdfPipelineOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.base_models import InputFormat
-from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
-from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    AcceleratorOptions,
-    AcceleratorDevice,
+from fastembed import SparseTextEmbedding
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import RectangleObject
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchValue,
+    PointStruct,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
 )
+from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -366,20 +380,16 @@ def split_pdf_pages(src_path: Path, n_parts: int) -> Path:
     Single-column pages (chapter openers, full-width figures, etc.) pass through
     unchanged so text is never cut through mid-column.
 
-    The result is cached in data/_presplit/. Delete the cached file to re-detect.
+    The result is cached in data/_presplit/. Cache is invalidated when source mtime changes.
     """
-    import pypdfium2 as pdfium
-    from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import RectangleObject
-
     _TMP_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = _TMP_DIR / f"{src_path.stem}_split{n_parts}.pdf"
 
-    if tmp_path.exists():
-        print(f"  [cache] using pre-split PDF: {tmp_path.name}")
+    if tmp_path.exists() and tmp_path.stat().st_mtime >= src_path.stat().st_mtime:
+        logger.info("  [cache] using pre-split PDF: %s", tmp_path.name)
         return tmp_path
 
-    print(f"  Analysing per-page layout for {src_path.name} …")
+    logger.info("  Analysing per-page layout for %s …", src_path.name)
     pdfium_doc = pdfium.PdfDocument(str(src_path))
     reader     = PdfReader(str(src_path))
     n_pages    = len(reader.pages)
@@ -389,7 +399,7 @@ def split_pdf_pages(src_path: Path, n_parts: int) -> Path:
         _detect_page_gutters(pdfium_doc[i], n_parts) for i in range(n_pages)
     ]
     n_split = sum(1 for g in page_gutters if g is not None)
-    print(f"  {n_split}/{n_pages} pages detected as {n_parts}-column (rest pass through)")
+    logger.info("  %d/%d pages detected as %d-column (rest pass through)", n_split, n_pages, n_parts)
 
     # Second pass: build the output PDF.
     # Split pages need n_parts independent copies (one per strip); we use one
@@ -434,7 +444,7 @@ def split_pdf_pages(src_path: Path, n_parts: int) -> Path:
     total_out = pass_counter + split_counter * n_parts
     with open(str(tmp_path), "wb") as f:
         final.write(f)
-    print(f"  Pre-split done → {total_out} pages saved to {tmp_path.name}")
+    logger.info("  Pre-split done → %d pages saved to %s", total_out, tmp_path.name)
     return tmp_path
 
 
@@ -523,45 +533,34 @@ def process_book(
     converter: DocumentConverter,
 ) -> None:
     """
-    Process a single book: parse → chunk → embed → store in Qdrant.
-    Checks if the book is already embedded (by counting existing chunks with the same book key).
-    If already embedded, skips processing unless "_force" is set in the book dict, in which case it deletes existing chunks first and re-embeds.
-    If "_ocr" is set in the book dict and sparse text is detected, re-runs parsing with OCR enabled for better text extraction from scanned PDFs.
-    Uses a hybrid embedding approach: dense vectors capture semantic meaning, while sparse BM25 vectors capture exact keyword matches, which is especially helpful for tables and technical text.
-    Stores both dense and sparse vectors in Qdrant for each chunk, allowing for flexible retrieval strategies later on.
-    Each chunk's payload includes metadata such as book key, title, category, chunk type (text or table), section heading, and the original text for debugging and potential future use.
-    Prints detailed progress logs at each step for visibility into the processing pipeline.
-    Designed to run locally without any external API dependencies, making it cost-effective and private.
+    Parse → chunk → embed → upsert one book into Qdrant.
 
-    input:
-    - book: dict with keys "key", "title", "category", "path", optional "_force" and "_ocr"
-    - client: QdrantClient instance for database operations
-    - dense_model: SentenceTransformer instance for dense embeddings
-    - sparse_model: SparseTextEmbedding instance for sparse BM25 embeddings
-    - converter: DocumentConverter instance for parsing PDFs with Docling
+    Skips books already present unless book["_force"] is set (which triggers a delete + re-embed).
+    Falls back to per-page column splitting when layout quality is low, and optionally runs OCR
+    when book["_ocr"] is set and extracted text is suspiciously sparse.
     """
     path = PROJECT_ROOT / book["path"]
     if not path.exists():
-        print(f"  [SKIP] file not found: {path}")
+        logger.info("  [SKIP] file not found: %s", path)
         return
 
     book_filter = Filter(must=[FieldCondition(key="book", match=MatchValue(value=book["key"]))])
     existing_count = client.count(COLLECTION_NAME, count_filter=book_filter).count
     if existing_count > 0:
         if not book.get("_force"):
-            print(f"  [SKIP] already embedded ({existing_count} chunks)")
+            logger.info("  [SKIP] already embedded (%d chunks)", existing_count)
             return
         client.delete(
             collection_name=COLLECTION_NAME,
             points_selector=FilterSelector(filter=book_filter),
         )
-        print(f"  [REEMBED] deleted {existing_count} old chunks")
+        logger.info("  [REEMBED] deleted %d old chunks", existing_count)
 
     # ── Parse: try Docling natively; fall back to column-split if layout is broken ──
-    print("  Parsing with Docling (this may take a few minutes)...")
+    logger.info("  Parsing with Docling (this may take a few minutes)...")
     result   = converter.convert(str(path))
     markdown = result.document.export_to_markdown()
-    print(f"  Markdown length: {len(markdown):,} chars")
+    logger.info("  Markdown length: %d chars", len(markdown))
 
     n_parts  = book.get("page_split")
     pdf_path = path  # updated below if split is applied
@@ -569,26 +568,26 @@ def process_book(
     if n_parts:
         orig_score = _layout_score(markdown, path)
         if _layout_is_broken(markdown, path):
-            print(f"  Broken layout detected (score={orig_score:.2f}) — retrying with {n_parts}-column page split …")
+            logger.info("  Broken layout detected (score=%.2f) — retrying with %d-column page split …", orig_score, n_parts)
         else:
-            print(f"  Layout score {orig_score:.2f} — applying configured {n_parts}-column page split …")
+            logger.info("  Layout score %.2f — applying configured %d-column page split …", orig_score, n_parts)
 
         split_path     = split_pdf_pages(path, n_parts)
         split_result   = converter.convert(str(split_path))
         split_markdown = split_result.document.export_to_markdown()
         split_score    = _layout_score(split_markdown, split_path)
 
-        print(f"  Layout score: original={orig_score:.2f}  after-split={split_score:.2f}")
+        logger.info("  Layout score: original=%.2f  after-split=%.2f", orig_score, split_score)
         if split_score >= orig_score:
-            print("  Using split parse.")
+            logger.info("  Using split parse.")
             pdf_path = split_path
             markdown = split_markdown
         else:
-            print("  WARNING: Split did not improve layout — reverting to original parse.")
+            logger.warning("  Split did not improve layout — reverting to original parse.")
 
     if _check_ocr_needed(markdown, pdf_path):
         if book.get("_ocr"):
-            print("  Sparse text detected — re-parsing with OCR enabled (slow)…")
+            logger.info("  Sparse text detected — re-parsing with OCR enabled (slow)…")
             ocr_pipeline = PdfPipelineOptions()
             ocr_pipeline.do_ocr = True
             ocr_pipeline.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
@@ -602,18 +601,21 @@ def process_book(
             )
             result   = ocr_converter.convert(str(pdf_path))
             markdown = result.document.export_to_markdown()
-            print(f"  Markdown length after OCR: {len(markdown):,} chars")
+            logger.info("  Markdown length after OCR: %d chars", len(markdown))
         else:
-            print(f"  WARNING: Very sparse text detected — {book['key']} may contain scanned pages.")
-            print(f"           Re-run with --ocr {book['key']} to enable OCR processing.")
+            logger.warning(
+                "  Very sparse text detected — %s may contain scanned pages. "
+                "Re-run with --ocr %s to enable OCR processing.",
+                book["key"], book["key"],
+            )
 
     chunks = chunk_markdown(markdown)
     tables = sum(1 for c in chunks if c["chunk_type"] == "table")
-    print(f"  Chunks: {len(chunks)} total  |  {tables} tables  |  {len(chunks)-tables} text")
+    logger.info("  Chunks: %d total  |  %d tables  |  %d text", len(chunks), tables, len(chunks) - tables)
 
     texts = [c["text"] for c in chunks]
 
-    print("  Embedding and storing (runs locally)...")
+    logger.info("  Embedding and storing (runs locally)...")
     BATCH = 64  # smaller batch — BGE-large is memory-hungry on CPU
     for batch_start in range(0, len(texts), BATCH):
         batch_texts    = texts[batch_start : batch_start + BATCH]
@@ -649,15 +651,21 @@ def process_book(
             for j in range(len(batch_texts))
         ]
         client.upsert(collection_name=COLLECTION_NAME, points=points)
-        print(f"    {batch_end_idx}/{len(texts)} chunks stored")
+        logger.info("    %d/%d chunks stored", batch_end_idx, len(texts))
 
-    print(f"  Done: {book['key']}")
+    logger.info("  Done: %s", book["key"])
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     import argparse
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     parser = argparse.ArgumentParser(description="Embed coaching books into Qdrant.")
     parser.add_argument(
         "--reembed", metavar="KEY", nargs="+",
@@ -671,47 +679,42 @@ def main() -> None:
     reembed_keys = set(args.reembed or [])
     ocr_keys     = set(args.ocr or [])
 
-    print(f"Dense model  : {EMBED_MODEL}")
-    print(f"Sparse model : {SPARSE_MODEL}")
-    print(f"Qdrant path  : {QDRANT_PATH}\n")
+    logger.info("Dense model  : %s", EMBED_MODEL)
+    logger.info("Sparse model : %s", SPARSE_MODEL)
+    logger.info("Qdrant path  : %s", QDRANT_PATH)
 
     QDRANT_PATH.mkdir(parents=True, exist_ok=True)
-    client = QdrantClient(path=str(QDRANT_PATH)) # new local Qdrant instance with file-based storage 
+    client = QdrantClient(path=str(QDRANT_PATH))
 
     existing_collections = {c.name for c in client.get_collections().collections}
-    if COLLECTION_NAME not in existing_collections: 
-        # Create collection with both dense and sparse vector configurations for hybrid search.
-        # Hybrid search: performs both sparse vector search and dense vector search, then combines the results. 
-        # Qdrant automatically handles the combination and ranking based on relevance.
-        #
-        # - Dense vectors (Semantic): Capture the context and conceptual meaning of the text.
-        # - Sparse vectors (BM25): Capture exact keyword matches, which is especially helpful for tables and technical text.
-        #
-        # In short: Sparse is a precise word search that locks onto specific medical/fitness jargon 
-        # (e.g., "VDOT", "HMB", "Beta-Alanine"), while Dense understands the overall intent 
-        # (e.g., "how to reduce fatigue during a run").
+    if COLLECTION_NAME not in existing_collections:
         client.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config={
-                "dense": VectorParams(size=1024, distance=Distance.COSINE), # must match EMBED_MODEL output size
+                "dense": VectorParams(size=1024, distance=Distance.COSINE),
             },
             sparse_vectors_config={
                 "sparse": SparseVectorParams(index=SparseIndexParams(on_disk=False)),
             },
         )
-        print(f"Created collection '{COLLECTION_NAME}'\n")
+        logger.info("Created collection '%s'", COLLECTION_NAME)
 
-    print(f"Collection has {client.count(COLLECTION_NAME).count} chunks at start\n")
+    logger.info("Collection has %d chunks at start", client.count(COLLECTION_NAME).count)
 
-    print("Loading dense embedding model…")
-    dense_model  = SentenceTransformer(EMBED_MODEL, device="mps")
-    print("Loading sparse (BM25) model…")
+    logger.info("Loading dense embedding model…")
+    if torch.cuda.is_available():
+        DEVICE = "cuda"
+    elif torch.backends.mps.is_available():
+        DEVICE = "mps"
+    else:
+        DEVICE = "cpu"
+    dense_model  = SentenceTransformer(EMBED_MODEL, device=DEVICE)
+    logger.info("Loading sparse (BM25) model…")
     sparse_model = SparseTextEmbedding(model_name=SPARSE_MODEL)
-    print()
 
-    # Force CPU: MPS (Apple Silicon) doesn't support float64 needed by layout model
+    # Force CPU: MPS (Apple Silicon) doesn't support float64 needed by Docling's layout model.
     pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_ocr = False  # pre-enable OCR for better text extraction from scanned PDFs; actual OCR run is conditional in process_book()
+    pipeline_options.do_ocr = False
     pipeline_options.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
 
     converter = DocumentConverter(
@@ -727,17 +730,23 @@ def main() -> None:
     for entry in ARTICLE_DIRS:
         all_books.extend(books_from_dir(entry))
 
+    failed: list[str] = []
     for book in all_books:
         if book["key"] in reembed_keys:
             book = {**book, "_force": True}
         if book["key"] in ocr_keys:
             book = {**book, "_ocr": True}
-        print(f"[{book['key']}] {book['title']}")
-        process_book(book, client, dense_model, sparse_model, converter)
-        print()
+        logger.info("[%s] %s", book["key"], book["title"])
+        try:
+            process_book(book, client, dense_model, sparse_model, converter)
+        except Exception:
+            logger.exception("[%s] Failed — skipping", book["key"])
+            failed.append(book["key"])
 
-    print(f"Final collection size: {client.count(COLLECTION_NAME).count} chunks")
-    print(f"Qdrant stored at: {QDRANT_PATH}")
+    logger.info("Final collection size: %d chunks", client.count(COLLECTION_NAME).count)
+    logger.info("Qdrant stored at: %s", QDRANT_PATH)
+    if failed:
+        logger.warning("Books that failed and were skipped: %s", ", ".join(failed))
 
 
 if __name__ == "__main__":

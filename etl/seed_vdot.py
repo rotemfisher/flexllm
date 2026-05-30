@@ -7,6 +7,9 @@ they can't be extracted by PDF parsers. This seeds the data directly.
 Paces are stored as seconds-per-km. The table covers VDOT 30–85.
 Zones: E (Easy), M (Marathon), T (Threshold/Tempo), I (Interval), R (Repetition)
 
+Note: Daniels' table does not include every VDOT value; 81–84 are absent.
+get_vdot_paces() will return the nearest available value for missing entries.
+
 Run once:
     python etl/seed_vdot.py
 """
@@ -37,6 +40,7 @@ CREATE TABLE IF NOT EXISTS vdot_paces (
 # fmt: off
 # Source: Daniels' Running Formula 4th ed., Table 3.1
 # Paces in sec/km.  i_pace and r_pace are per-km equivalents.
+# Note: not every VDOT integer is in the source table (e.g. 81–84 are absent).
 VDOT_DATA = [
     # vdot  E_slow  E_fast   M      T      I      R
     (30,    531,    504,    490,    472,    450,    430),
@@ -78,34 +82,35 @@ def sec_to_pace(sec: int) -> str:
 
 def seed(db_path: Path) -> None:
     con = sqlite3.connect(db_path)
-    con.execute(CREATE_TABLE)
+    try:
+        con.execute(CREATE_TABLE)
 
-    con.executemany(
-        """
-        INSERT OR REPLACE INTO vdot_paces
-            (vdot, e_pace_slow_sec, e_pace_fast_sec, m_pace_sec,
-             t_pace_sec, i_pace_sec, r_pace_sec)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        VDOT_DATA,
-    )
-    con.commit()
+        con.executemany(
+            """
+            INSERT OR REPLACE INTO vdot_paces
+                (vdot, e_pace_slow_sec, e_pace_fast_sec, m_pace_sec,
+                 t_pace_sec, i_pace_sec, r_pace_sec)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            VDOT_DATA,
+        )
+        con.commit()
 
-    count = con.execute("SELECT COUNT(*) FROM vdot_paces").fetchone()[0]
-    print(f"Seeded {count} VDOT rows")
+        count = con.execute("SELECT COUNT(*) FROM vdot_paces").fetchone()[0]
+        print(f"Seeded {count} VDOT rows")
 
-    # Quick sanity check
-    row = con.execute("SELECT * FROM vdot_paces WHERE vdot = 50").fetchone()
-    if row:
-        vdot, e_slow, e_fast, m, t, i, r = row
-        print(f"\nVDOT 50 sample:")
-        print(f"  Easy:       {sec_to_pace(e_slow)} – {sec_to_pace(e_fast)} /km")
-        print(f"  Marathon:   {sec_to_pace(m)} /km")
-        print(f"  Threshold:  {sec_to_pace(t)} /km")
-        print(f"  Interval:   {sec_to_pace(i)} /km")
-        print(f"  Rep:        {sec_to_pace(r)} /km")
-
-    con.close()
+        # Quick sanity check
+        row = con.execute("SELECT * FROM vdot_paces WHERE vdot = 50").fetchone()
+        if row:
+            vdot, e_slow, e_fast, m, t, i, r = row
+            print(f"\nVDOT 50 sample:")
+            print(f"  Easy:       {sec_to_pace(e_slow)} – {sec_to_pace(e_fast)} /km")
+            print(f"  Marathon:   {sec_to_pace(m)} /km")
+            print(f"  Threshold:  {sec_to_pace(t)} /km")
+            print(f"  Interval:   {sec_to_pace(i)} /km")
+            print(f"  Rep:        {sec_to_pace(r)} /km")
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-import sqlite3
 from langchain_core.tools import tool
-from src.config import config
+
+from src.tools._utils import db_ro
 
 
 def _fmt_pace(decimal_min: float | None) -> str:
@@ -23,50 +23,47 @@ def get_progress_report(weeks: int = 8) -> str:
     """
     weeks = min(max(weeks, 1), 52)
 
-    con = None
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
+        with db_ro() as con:
+            weekly = con.execute(
+                """
+                SELECT
+                    strftime('%Y-W%W', start_date)           AS week,
+                    MIN(substr(start_date, 1, 10))           AS week_from,
+                    COUNT(*)                                 AS runs,
+                    ROUND(SUM(distance_km), 1)               AS total_km,
+                    ROUND(AVG(pace_min_per_km), 2)           AS avg_pace,
+                    ROUND(AVG(avg_heart_rate_bpm), 0)        AS avg_hr,
+                    ROUND(AVG(CAST(rpe AS REAL)), 1)         AS avg_rpe,
+                    ROUND(SUM(training_stress_score), 0)     AS total_tss
+                FROM v_running_overview
+                WHERE start_date >= date('now', ?)
+                GROUP BY week
+                ORDER BY week DESC
+                """,
+                (f"-{weeks} weeks",),
+            ).fetchall()
 
-        weekly = con.execute(
-            """
-            SELECT
-                strftime('%Y-W%W', start_date)           AS week,
-                MIN(substr(start_date, 1, 10))           AS week_from,
-                COUNT(*)                                 AS runs,
-                ROUND(SUM(distance_km), 1)               AS total_km,
-                ROUND(AVG(pace_min_per_km), 2)           AS avg_pace,
-                ROUND(AVG(avg_heart_rate_bpm), 0)        AS avg_hr,
-                ROUND(AVG(CAST(rpe AS REAL)), 1)         AS avg_rpe,
-                ROUND(SUM(training_stress_score), 0)     AS total_tss
-            FROM v_running_overview
-            WHERE start_date >= date('now', ?)
-            GROUP BY week
-            ORDER BY week DESC
-            """,
-            (f"-{weeks} weeks",),
-        ).fetchall()
+            fitness = con.execute(
+                """
+                SELECT date, ctl, atl, tsb, hrv_sdnn_ms, vo2max_ml_kg_min,
+                       resting_heart_rate_bpm, body_mass_kg
+                FROM daily_health
+                WHERE ctl IS NOT NULL
+                ORDER BY date DESC LIMIT 1
+                """
+            ).fetchone()
 
-        fitness = con.execute(
-            """
-            SELECT date, ctl, atl, tsb, hrv_sdnn_ms, vo2max_ml_kg_min,
-                   resting_heart_rate_bpm, body_mass_kg
-            FROM daily_health
-            WHERE ctl IS NOT NULL
-            ORDER BY date DESC LIMIT 1
-            """
-        ).fetchone()
-
-        injuries = con.execute(
-            """
-            SELECT
-                COUNT(*)                                                        AS total,
-                SUM(CASE WHEN status IN ('active','recovering') THEN 1 ELSE 0 END) AS active_count
-            FROM injuries
-            WHERE onset_date >= date('now', ?)
-            """,
-            (f"-{weeks} weeks",),
-        ).fetchone()
+            injuries = con.execute(
+                """
+                SELECT
+                    COUNT(*)                                                        AS total,
+                    SUM(CASE WHEN status IN ('active','recovering') THEN 1 ELSE 0 END) AS active_count
+                FROM injuries
+                WHERE onset_date >= date('now', ?)
+                """,
+                (f"-{weeks} weeks",),
+            ).fetchone()
 
         lines = [f"=== Progress Report: Last {weeks} Weeks ===\n"]
 
@@ -74,10 +71,10 @@ def get_progress_report(weeks: int = 8) -> str:
         if fitness:
             tsb = fitness["tsb"] or 0.0
             form = (
-                "very fresh"        if tsb > 25  else
-                "race-ready"        if tsb > 5   else
-                "normal training"   if tsb > -10 else
-                "building / fatigued" if tsb > -25 else
+                "very fresh"                if tsb > 25  else
+                "race-ready"                if tsb > 5   else
+                "normal training"           if tsb > -10 else
+                "building / fatigued"       if tsb > -25 else
                 "HIGH FATIGUE — reduce load"
             )
             lines.append("Current Fitness Snapshot:")
@@ -100,8 +97,8 @@ def get_progress_report(weeks: int = 8) -> str:
             lines.append("  " + "-" * (len(header) - 2))
             for w in weekly:
                 pace_s = _fmt_pace(w["avg_pace"])
-                hr_s   = f"{w['avg_hr']:.0f}"   if w["avg_hr"]   else "N/A"
-                rpe_s  = f"{w['avg_rpe']:.1f}"  if w["avg_rpe"]  else "N/A"
+                hr_s   = f"{w['avg_hr']:.0f}"    if w["avg_hr"]    else "N/A"
+                rpe_s  = f"{w['avg_rpe']:.1f}"   if w["avg_rpe"]   else "N/A"
                 tss_s  = f"{w['total_tss']:.0f}" if w["total_tss"] else "N/A"
                 lines.append(
                     f"  {w['week_from']:<12} {w['runs']:>4} {w['total_km']:>6.1f} "
@@ -153,6 +150,3 @@ def get_progress_report(weeks: int = 8) -> str:
 
     except Exception as exc:
         return f"Database error: {exc}"
-    finally:
-        if con:
-            con.close()

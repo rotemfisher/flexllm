@@ -1,11 +1,10 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
+
 from langchain_core.tools import tool
+
 from src.config import config
-
-
-def _epley_1rm(weight_kg: float, reps: int) -> float:
-    return weight_kg if reps == 1 else weight_kg * (1 + reps / 30)
+from src.tools._utils import db_ro, db_rw, epley_1rm
 
 
 def _pace_to_vdot(pace_sec_per_km: float, con: sqlite3.Connection) -> float | None:
@@ -28,37 +27,33 @@ def get_onboarding_status() -> str:
     Call this at the very start of a first session or when the athlete profile is fresh.
     Returns the onboarding protocol if assessment is needed, or clears the athlete to train.
     """
-    con = None
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
+        with db_ro() as con:
+            profile = con.execute(
+                "SELECT fitness_level, onboarding_complete, current_goal, secondary_goal FROM athlete_profile ORDER BY id DESC LIMIT 1"
+            ).fetchone()
 
-        profile = con.execute(
-            "SELECT fitness_level, onboarding_complete, current_goal, secondary_goal FROM athlete_profile ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+            if not profile:
+                return (
+                    "No athlete profile found. Ask the athlete for: age, sex, height, weight, "
+                    "fitness_level (beginner/intermediate/advanced), primary goal, and any dietary preferences."
+                )
 
-        if not profile:
-            return (
-                "No athlete profile found. Ask the athlete for: age, sex, height, weight, "
-                "fitness_level (beginner/intermediate/advanced), primary goal, and any dietary preferences."
-            )
+            if profile["onboarding_complete"]:
+                return (
+                    f"Onboarding complete. Athlete is '{profile['fitness_level']}' level. "
+                    f"Cleared to train — proceed with daily readiness check."
+                )
 
-        if profile["onboarding_complete"]:
-            return (
-                f"Onboarding complete. Athlete is '{profile['fitness_level']}' level. "
-                f"Cleared to train — proceed with daily readiness check."
-            )
+            level = profile["fitness_level"]
+            goal = profile["current_goal"] or "general fitness"
 
-        level = profile["fitness_level"]
-        goal = profile["current_goal"] or "general fitness"
-
-        # Check what assessments already exist
-        has_run_assessment = con.execute(
-            "SELECT 1 FROM fitness_assessments WHERE assessment_type IN ('onboarding_run','time_trial') LIMIT 1"
-        ).fetchone()
-        has_strength_assessment = con.execute(
-            "SELECT 1 FROM fitness_assessments WHERE assessment_type IN ('onboarding_strength','strength_1rm') LIMIT 1"
-        ).fetchone()
+            has_run_assessment = con.execute(
+                "SELECT 1 FROM fitness_assessments WHERE assessment_type IN ('onboarding_run','time_trial') LIMIT 1"
+            ).fetchone()
+            has_strength_assessment = con.execute(
+                "SELECT 1 FROM fitness_assessments WHERE assessment_type IN ('onboarding_strength','strength_1rm') LIMIT 1"
+            ).fetchone()
 
         lines = [f"ONBOARDING REQUIRED — Fitness level: {level} | Goal: {goal}\n"]
 
@@ -93,9 +88,6 @@ def get_onboarding_status() -> str:
 
     except Exception as exc:
         return f"Database error: {exc}"
-    finally:
-        if con:
-            con.close()
 
 
 @tool
@@ -130,48 +122,47 @@ def log_fitness_assessment(
         reps: required when metric_name='weight_kg' — number of reps performed for 1RM estimation
         notes: any additional context (e.g. 'felt tired', 'track surface')
     """
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     estimated_vdot = None
     estimated_1rm_kg = None
 
-    con = None
     try:
-        con = sqlite3.connect(config.DB_PATH)
-        con.row_factory = sqlite3.Row
+        with db_rw() as con:
+            con.row_factory = sqlite3.Row
 
-        # Auto-compute derived values
-        if assessment_type in ("onboarding_run", "time_trial"):
-            if metric_name == "time_sec" and distance_km is not None:
-                pace_sec_per_km = metric_value / distance_km
-                estimated_vdot = _pace_to_vdot(pace_sec_per_km, con)
-            elif metric_name == "pace_min_per_km":
-                pace_sec = metric_value * 60
-                estimated_vdot = _pace_to_vdot(pace_sec, con)
+            # Auto-compute derived values
+            if assessment_type in ("onboarding_run", "time_trial"):
+                if metric_name == "time_sec" and distance_km is not None:
+                    pace_sec_per_km = metric_value / distance_km
+                    estimated_vdot = _pace_to_vdot(pace_sec_per_km, con)
+                elif metric_name == "pace_min_per_km":
+                    pace_sec = metric_value * 60
+                    estimated_vdot = _pace_to_vdot(pace_sec, con)
 
-        elif assessment_type == "cooper_test" and metric_name == "distance_m":
-            # Cooper: VO2max ≈ (distance_m - 504.9) / 44.73, then VDOT ≈ VO2max
-            vo2max = (metric_value - 504.9) / 44.73
-            row = con.execute(
-                "SELECT vdot FROM vdot_paces ORDER BY ABS(vdot - ?) ASC LIMIT 1", (vo2max,)
-            ).fetchone()
-            estimated_vdot = row[0] if row else None
+            elif assessment_type == "cooper_test" and metric_name == "distance_m":
+                # Cooper: VO2max ≈ (distance_m - 504.9) / 44.73, then VDOT ≈ VO2max
+                vo2max = (metric_value - 504.9) / 44.73
+                row = con.execute(
+                    "SELECT vdot FROM vdot_paces ORDER BY ABS(vdot - ?) ASC LIMIT 1", (vo2max,)
+                ).fetchone()
+                estimated_vdot = row[0] if row else None
 
-        elif assessment_type in ("onboarding_strength", "strength_1rm") and metric_name == "weight_kg":
-            if reps is not None:
-                estimated_1rm_kg = round(_epley_1rm(metric_value, reps), 1)
+            elif assessment_type in ("onboarding_strength", "strength_1rm") and metric_name == "weight_kg":
+                if reps is not None:
+                    estimated_1rm_kg = round(epley_1rm(metric_value, reps), 1)
 
-        con.row_factory = None
-        con.execute(
-            """
-            INSERT INTO fitness_assessments
-                (assessment_date, assessment_type, exercise_name, metric_name,
-                 metric_value, estimated_vdot, estimated_1rm_kg, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (today, assessment_type, exercise_name, metric_name,
-             metric_value, estimated_vdot, estimated_1rm_kg, notes),
-        )
-        con.commit()
+            con.row_factory = None
+            con.execute(
+                """
+                INSERT INTO fitness_assessments
+                    (assessment_date, assessment_type, exercise_name, metric_name,
+                     metric_value, estimated_vdot, estimated_1rm_kg, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (today, assessment_type, exercise_name, metric_name,
+                 metric_value, estimated_vdot, estimated_1rm_kg, notes),
+            )
+            con.commit()
 
         result = f"Assessment logged ({assessment_type}) on {today}: {metric_name} = {metric_value}"
         if estimated_vdot:
@@ -183,9 +174,6 @@ def log_fitness_assessment(
 
     except Exception as exc:
         return f"Database error: {exc}"
-    finally:
-        if con:
-            con.close()
 
 
 @tool
@@ -199,32 +187,29 @@ def get_fitness_assessments(assessment_type: str | None = None, limit: int = 6) 
         limit: number of records to return (default 6).
     """
     limit = min(max(limit, 1), 20)
-    con = None
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-
-        if assessment_type:
-            rows = con.execute(
-                """
-                SELECT assessment_date, assessment_type, exercise_name, metric_name,
-                       metric_value, estimated_vdot, estimated_1rm_kg, notes
-                FROM fitness_assessments
-                WHERE assessment_type = ?
-                ORDER BY assessment_date DESC LIMIT ?
-                """,
-                (assessment_type, limit),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                """
-                SELECT assessment_date, assessment_type, exercise_name, metric_name,
-                       metric_value, estimated_vdot, estimated_1rm_kg, notes
-                FROM fitness_assessments
-                ORDER BY assessment_date DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+        with db_ro() as con:
+            if assessment_type:
+                rows = con.execute(
+                    """
+                    SELECT assessment_date, assessment_type, exercise_name, metric_name,
+                           metric_value, estimated_vdot, estimated_1rm_kg, notes
+                    FROM fitness_assessments
+                    WHERE assessment_type = ?
+                    ORDER BY assessment_date DESC LIMIT ?
+                    """,
+                    (assessment_type, limit),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT assessment_date, assessment_type, exercise_name, metric_name,
+                           metric_value, estimated_vdot, estimated_1rm_kg, notes
+                    FROM fitness_assessments
+                    ORDER BY assessment_date DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
 
         if not rows:
             return "No fitness assessments recorded yet."
@@ -264,6 +249,3 @@ def get_fitness_assessments(assessment_type: str | None = None, limit: int = 6) 
 
     except Exception as exc:
         return f"Database error: {exc}"
-    finally:
-        if con:
-            con.close()

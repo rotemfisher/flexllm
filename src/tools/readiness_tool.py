@@ -1,7 +1,9 @@
-import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
+
 from langchain_core.tools import tool
-from src.config import config
+
+from src.tools._utils import db_ro
+
 
 @tool
 def get_daily_readiness(date: str | None = None) -> str:
@@ -13,28 +15,32 @@ def get_daily_readiness(date: str | None = None) -> str:
         date (str, optional): The date in 'YYYY-MM-DD' format. Defaults to today.
     """
     if not date:
-        date = datetime.now().strftime("%Y-%m-%d")
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    con = None
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-
-        health = con.execute(
-            "SELECT * FROM daily_health WHERE date <= ? ORDER BY date DESC LIMIT 1",
-            (date,)
-        ).fetchone()
+        with db_ro() as con:
+            health = con.execute(
+                """
+                SELECT date, atl, ctl, tsb,
+                       resting_heart_rate_bpm, hrv_sdnn_ms, body_mass_kg,
+                       sleep_total_min, sleep_deep_min, sleep_rem_min
+                FROM daily_health
+                WHERE date <= ?
+                ORDER BY date DESC LIMIT 1
+                """,
+                (date,),
+            ).fetchone()
 
         if not health:
             return f"No health or readiness data found on or before {date}."
 
-        sleep_total = health['sleep_total_min'] or 0
+        sleep_total = health["sleep_total_min"] or 0
         sleep_hours = sleep_total // 60
-        sleep_mins = sleep_total % 60
+        sleep_mins  = sleep_total % 60
 
-        atl = health['atl'] or 0.0
-        ctl = health['ctl'] or 0.0
-        tsb = health['tsb'] or 0.0
+        atl = health["atl"] or 0.0
+        ctl = health["ctl"] or 0.0
+        tsb = health["tsb"] or 0.0
 
         form_status = "Fresh" if tsb > 0 else "Fatigued" if tsb < -10 else "Optimal/Neutral"
 
@@ -56,6 +62,3 @@ def get_daily_readiness(date: str | None = None) -> str:
 
     except Exception as exc:
         return f"Database error: {exc}"
-    finally:
-        if con:
-            con.close()
