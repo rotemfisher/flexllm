@@ -43,6 +43,7 @@ def _trim_messages(messages: list[BaseMessage], max_messages: int = _MAX_HISTORY
     result (without its AIMessage parent that contains tool_calls) confuses
     the Ollama chat format and can cause an API error.
     """
+    # working with tools is always in pairs of AIMessage + ToolMessage, so max_messages should be even to avoid cutting off in the middle of a pair.  
     if len(messages) <= max_messages:
         return messages
     trimmed = list(messages[-max_messages:])
@@ -76,10 +77,13 @@ def _make_agent_node(llm_with_tools, prompt_builder):
     def call_model(state: CoachState) -> dict:
         system_prompt = prompt_builder(state.get("athlete_context", ""))
         history = _trim_messages(list(state["messages"]))
+        reason = state.get("handoff_reason")
+        if reason:
+            system_prompt += f"\n\nCRITICAL CONTEXT: You have just received control of the session. The previous agent's handoff note: '{reason}'"
         messages = [SystemMessage(content=system_prompt)] + history
         response = llm_with_tools.invoke(messages)
         response = _resolve_tool_conflicts(response)
-        return {"messages": [response]}
+        return {"messages": [response], "handoff_reason": None}
     return call_model
 
 
@@ -150,5 +154,6 @@ def build_multi_agent_graph():
     graph.add_edge("recovery_tools",  "recovery_coach")
     graph.add_edge("dietitian_tools", "dietitian")
 
+    # Yield the compiled graph with a SqliteSaver checkpointer. Using a context manager ensures the checkpointer connection is properly closed after use.
     with SqliteSaver.from_conn_string(config.DB_PATH) as checkpointer:
         yield graph.compile(checkpointer=checkpointer)

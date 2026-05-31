@@ -24,7 +24,8 @@ def trainer_transfer(
 
     reason — concise handoff note for the receiving agent (key values, clinical context).
     """
-    return Command(goto=target, update={"active_agent": target})
+    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
+
 
 
 @tool
@@ -47,7 +48,7 @@ def physio_transfer(
 
     reason — handoff note with return-to-train restrictions or clinical context for the receiving agent.
     """
-    return Command(goto=target, update={"active_agent": target})
+    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
 
 
 @tool
@@ -70,7 +71,7 @@ def recovery_transfer(
 
     reason — handoff note with TSB, HRV, and sleep values plus clinical rationale.
     """
-    return Command(goto=target, update={"active_agent": target})
+    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
 
 
 @tool
@@ -93,4 +94,4 @@ def dietitian_transfer(
 
     reason — handoff note with nutritional context and recommendations already provided.
     """
-    return Command(goto=target, update={"active_agent": target})
+    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
