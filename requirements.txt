@@ -1,0 +1,12 @@
+langgraph
+langgraph-checkpoint-sqlite
+langchain-ollama
+python-dotenv
+pydantic
+pydantic-settings
+qdrant-client
+fastembed
+langsmith
+sentence-transformers
+pytest
+numpy
