@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_rw
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -69,6 +72,7 @@ def log_injury(
             f"Use injury ID {injury_id} for daily check-ins with log_injury_checkin."
         )
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -137,6 +141,7 @@ def log_injury_checkin(
             f"pain {pain_scale}/10 ({pain_context}) on {today}{trend}."
         )
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -180,4 +185,5 @@ def resolve_injury(injury_id: int, notes: str | None = None) -> str:
             con.commit()
         return f"Injury resolved: {row[1]} {row[0]} (ID {injury_id}) marked as recovered on {today}."
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

@@ -1,6 +1,10 @@
+import logging
+
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro
+
+logger = logging.getLogger(__name__)
 
 
 def _fmt_pace(decimal_min: float | None) -> str:
@@ -149,4 +153,5 @@ def get_progress_report(weeks: int = 8) -> str:
         return "\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

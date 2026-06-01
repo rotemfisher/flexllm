@@ -1,6 +1,10 @@
+import logging
+
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -41,6 +45,7 @@ def get_active_injuries() -> str:
         return report
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -136,4 +141,5 @@ def get_injury_recovery_trend(injury_id: int, days: int = 14) -> str:
         return "\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

@@ -1,6 +1,10 @@
+import logging
+
 from langchain_core.tools import tool
 
 from src.tools._utils import db_rw
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_FIELDS = {
     "current_goal",
@@ -49,4 +53,5 @@ def update_athlete_profile(field: str, value: str) -> str:
                 return "No athlete profile found. Create a profile first."
         return f"Updated athlete_profile.{field} = '{value}'"
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

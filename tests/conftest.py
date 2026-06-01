@@ -20,7 +20,8 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.tracing import setup_tracing
-setup_tracing()  # activate LangSmith tracing if LANGSMITH_API_KEY is set
+# Use a dedicated test project so test traces never mix with real coaching sessions.
+setup_tracing(project="flexllm-test")
 
 
 # ── prod_db ───────────────────────────────────────────────────────────────────

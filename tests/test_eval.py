@@ -494,6 +494,7 @@ class TestTracingSetup:
              patch("src.tracing.config") as mock_cfg:
             mock_cfg.LANGSMITH_API_KEY = "ls__fake_key"
             mock_cfg.LANGCHAIN_PROJECT = "test-project"
+            mock_cfg.ENVIRONMENT = "local"
             result = setup_tracing()
         assert result is True
 
@@ -503,10 +504,13 @@ class TestTracingSetup:
              patch("src.tracing.config") as mock_cfg:
             mock_cfg.LANGSMITH_API_KEY = "ls__fake_key"
             mock_cfg.LANGCHAIN_PROJECT = "flexllm-test"
+            mock_cfg.ENVIRONMENT = "staging"
             setup_tracing()
             assert os.environ.get("LANGCHAIN_TRACING_V2") == "true"
             assert os.environ.get("LANGSMITH_API_KEY") == "ls__fake_key"
             assert os.environ.get("LANGCHAIN_PROJECT") == "flexllm-test"
+            assert os.environ.get("LANGCHAIN_CALLBACKS_BACKGROUND") == "true"
+            assert os.environ.get("LANGCHAIN_TAGS") == "staging"
 
     def test_no_env_vars_set_when_key_missing(self):
         from src.tracing import setup_tracing
@@ -515,3 +519,46 @@ class TestTracingSetup:
             mock_cfg.LANGSMITH_API_KEY = None
             setup_tracing()
         assert os.environ.get("LANGCHAIN_TRACING_V2") == env_before
+
+    def test_logs_enabled_when_key_present(self):
+        from src.tracing import setup_tracing
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("src.tracing.config") as mock_cfg, \
+             patch("src.tracing.logger") as mock_log:
+            mock_cfg.LANGSMITH_API_KEY = "ls__fake_key"
+            mock_cfg.LANGCHAIN_PROJECT = "flexllm-test"
+            mock_cfg.ENVIRONMENT = "prod"
+            setup_tracing()
+        mock_log.info.assert_called_once()
+        call_args = mock_log.info.call_args[0]
+        assert "enabled" in call_args[0]
+
+    def test_logs_disabled_when_key_missing(self):
+        from src.tracing import setup_tracing
+        with patch("src.tracing.config") as mock_cfg, \
+             patch("src.tracing.logger") as mock_log:
+            mock_cfg.LANGSMITH_API_KEY = None
+            setup_tracing()
+        mock_log.info.assert_called_once()
+        call_args = mock_log.info.call_args[0]
+        assert "disabled" in call_args[0]
+
+    def test_project_override_takes_precedence(self):
+        from src.tracing import setup_tracing
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("src.tracing.config") as mock_cfg:
+            mock_cfg.LANGSMITH_API_KEY = "ls__fake_key"
+            mock_cfg.LANGCHAIN_PROJECT = "flexllm-local"
+            mock_cfg.ENVIRONMENT = "local"
+            setup_tracing(project="flexllm-test")
+            assert os.environ.get("LANGCHAIN_PROJECT") == "flexllm-test"
+
+    def test_config_project_used_when_no_override(self):
+        from src.tracing import setup_tracing
+        with patch.dict(os.environ, {}, clear=False), \
+             patch("src.tracing.config") as mock_cfg:
+            mock_cfg.LANGSMITH_API_KEY = "ls__fake_key"
+            mock_cfg.LANGCHAIN_PROJECT = "flexllm-local"
+            mock_cfg.ENVIRONMENT = "local"
+            setup_tracing()
+            assert os.environ.get("LANGCHAIN_PROJECT") == "flexllm-local"

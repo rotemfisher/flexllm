@@ -4,8 +4,10 @@ from contextlib import contextmanager
 from src.config import config
 from src.agent.graph import build_multi_agent_graph
 from src.agent.memory import SummaryStore
+from src.tracing import traceable
 
 
+@traceable(name="get_athlete_context", run_type="retriever")
 def get_athlete_context() -> str:
     """Build the static context block injected into every agent's system prompt.
 

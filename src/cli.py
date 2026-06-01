@@ -4,6 +4,8 @@ FlexLLM Coach — interactive CLI.
 Run from the project root:
     python -m src.cli
 """
+import uuid
+
 from langchain_core.messages import AIMessageChunk
 
 from src.tracing import setup_tracing
@@ -39,10 +41,22 @@ def _persist_session_summaries(graph, run_config: dict, initial_message_count: i
 
 
 def main() -> None:
-    setup_tracing()
+    tracing_on = setup_tracing()
     print("Loading FlexLLM Coach (first run loads the embedding model, ~5s)...")
     athlete_ctx = get_athlete_context()
-    run_config = {"configurable": {"thread_id": THREAD_ID}}
+    session_id = uuid.uuid4().hex[:12]
+    run_config = {
+        "configurable": {"thread_id": THREAD_ID},
+        "run_name": f"coaching-{THREAD_ID}",
+        "tags": [config.ENVIRONMENT, "cli", config.MODEL_ID],
+        "metadata": {
+            "source": "cli",
+            "session_id": session_id,
+            "thread_id": THREAD_ID,
+            "model": config.MODEL_ID,
+            "environment": config.ENVIRONMENT,
+        },
+    }
 
     with build_coach_graph() as graph:
         # Snapshot message count so we can extract only this session's messages later.
@@ -52,7 +66,8 @@ def main() -> None:
         except Exception:
             initial_message_count = 0
 
-        print("\nFlexLLM Coach ready. Type 'quit' to exit.\n")
+        tracing_label = f"LangSmith ({config.LANGCHAIN_PROJECT})" if tracing_on else "off"
+        print(f"\nFlexLLM Coach ready. Type 'quit' to exit.  [tracing: {tracing_label}]\n")
         print(athlete_ctx)
         print()
 

@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -5,6 +6,8 @@ from langchain_core.tools import tool
 
 from src.config import config
 from src.tools._utils import db_ro, db_rw, epley_1rm
+
+logger = logging.getLogger(__name__)
 
 
 def _pace_to_vdot(pace_sec_per_km: float, con: sqlite3.Connection) -> float | None:
@@ -87,6 +90,7 @@ def get_onboarding_status() -> str:
         return "\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -173,6 +177,7 @@ def log_fitness_assessment(
         return result
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -248,4 +253,5 @@ def get_fitness_assessments(assessment_type: str | None = None, limit: int = 6) 
         return "\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

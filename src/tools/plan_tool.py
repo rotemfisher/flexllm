@@ -1,9 +1,12 @@
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro, db_rw
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -84,6 +87,7 @@ def save_workout_plan(week_start: str, sessions: str) -> str:
             summary += f" ({assessment_count} assessment session(s) included.)"
         return summary
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -148,6 +152,7 @@ def get_current_workout_plan() -> str:
         return "\n\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -208,6 +213,7 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: str) -> str:
             con.commit()
         return f"Updated {len(plan)} session(s) for {day_date} in the week of {week_start}."
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -277,4 +283,5 @@ def update_planned_workout_status(
         return msg + (f" (reason: {reason})" if reason else "") + "."
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

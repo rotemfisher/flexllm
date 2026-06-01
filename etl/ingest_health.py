@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from langsmith import traceable
+
 logger = logging.getLogger(__name__)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
@@ -460,6 +462,7 @@ class HealthIngester:
 
     # ── XML streaming ─────────────────────────────────────────────────────────
 
+    @traceable(name="etl:parse_apple_health_xml", run_type="tool")
     def _stream_xml(self) -> None:
         logger.info("Streaming %s …", self.xml.name)
         inside_workout = False
@@ -568,6 +571,7 @@ class HealthIngester:
 
     # ── Training stress score (TRIMP) ─────────────────────────────────────────
 
+    @traceable(name="etl:compute_training_stress", run_type="tool")
     def _compute_tss(self) -> None:
         logger.info("Computing TSS (TRIMP) …")
         profile = self.con.execute(
@@ -610,6 +614,7 @@ class HealthIngester:
 
     # ── daily_health aggregation ──────────────────────────────────────────────
 
+    @traceable(name="etl:aggregate_daily_health", run_type="tool")
     def _aggregate_daily(self) -> None:
         logger.info("Aggregating daily_health …")
         self.con.executescript(
@@ -656,6 +661,7 @@ class HealthIngester:
 
     # ── ATL / CTL / TSB ──────────────────────────────────────────────────────
 
+    @traceable(name="etl:compute_atl_ctl_tsb", run_type="tool")
     def _compute_load(self) -> None:
         logger.info("Computing ATL / CTL / TSB …")
         rows = self.con.execute(
@@ -680,6 +686,7 @@ class HealthIngester:
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
+    @traceable(name="etl:ingest_health_data", run_type="tool")
     def run(self) -> None:
         try:
             self._stream_xml()

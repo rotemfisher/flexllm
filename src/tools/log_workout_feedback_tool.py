@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_rw
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -44,4 +47,5 @@ def log_workout_rpe_and_notes(rpe: int, notes: str, date: str | None = None, act
         return f"Successfully logged RPE {rpe} and notes for the {activity_type} workout on {date}."
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

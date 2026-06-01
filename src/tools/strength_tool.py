@@ -1,8 +1,11 @@
 import json
+import logging
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro, db_rw, epley_1rm
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -81,6 +84,7 @@ def log_strength_sets(workout_id: int, sets_json: str) -> str:
         return "\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"
 
 
@@ -180,4 +184,5 @@ def get_recent_strength_sets(exercise_name: str, sessions: int = 4) -> str:
         return "\n".join(lines)
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

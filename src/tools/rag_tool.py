@@ -1,8 +1,11 @@
+import logging
 import threading
 
 from fastembed import SparseTextEmbedding
 from langchain_core.tools import tool
 from qdrant_client import QdrantClient
+
+logger = logging.getLogger(__name__)
 from qdrant_client.models import (
     FieldCondition,
     Filter,
@@ -32,10 +35,14 @@ def _get_models():
     if _client is None:
         with _lock:
             if _client is None:  # double-checked locking
-                _client       = QdrantClient(path=config.QDRANT_PATH)
-                _dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
-                _sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
-                _rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
+                try:
+                    _client       = QdrantClient(path=config.QDRANT_PATH)
+                    _dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
+                    _sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
+                    _rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
+                except Exception:
+                    logger.exception("Failed to initialize RAG models — is the Qdrant DB built?")
+                    raise
     return _client, _dense_model, _sparse_model, _rerank_model
 
 
@@ -70,50 +77,55 @@ def search_coaching_books(query: str, book_filter: str | None = None, n_results:
     - query="VDOT interval paces", book_filter="daniels"         → Daniels only
     - query="carbohydrate loading race day", book_filter="sport_nutrition"
     """
-    client, dense_model, sparse_model, rerank_model = _get_models()
+    try:
+        client, dense_model, sparse_model, rerank_model = _get_models()
 
-    dense_vec  = dense_model.encode([query], normalize_embeddings=True)[0].tolist()
-    sparse_raw = list(sparse_model.embed([query]))[0]
-    sparse_q   = SparseVector(
-        indices=sparse_raw.indices.tolist(),
-        values=sparse_raw.values.tolist(),
-    )
-
-    query_filter = None
-    if book_filter:
-        query_filter = Filter(
-            must=[FieldCondition(key="book", match=MatchValue(value=book_filter))]
+        dense_vec  = dense_model.encode([query], normalize_embeddings=True)[0].tolist()
+        sparse_raw = list(sparse_model.embed([query]))[0]
+        sparse_q   = SparseVector(
+            indices=sparse_raw.indices.tolist(),
+            values=sparse_raw.values.tolist(),
         )
 
-    # Fetch a wider candidate pool so the reranker has more to work with
-    rerank_pool = max(n_results * 6, 30)
-    results = client.query_points(
-        collection_name=config.QDRANT_COLLECTION,
-        prefetch=[
-            Prefetch(query=dense_vec, using="dense", limit=rerank_pool),
-            Prefetch(query=sparse_q,  using="sparse", limit=rerank_pool),
-        ],
-        query=Fusion.RRF,
-        limit=rerank_pool,
-        query_filter=query_filter,
-        with_payload=True,
-    )
+        query_filter = None
+        if book_filter:
+            query_filter = Filter(
+                must=[FieldCondition(key="book", match=MatchValue(value=book_filter))]
+            )
 
-    points = results.points
-    if points:
-        texts  = [p.payload.get("text", "") for p in points]
-        scores = rerank_model.predict([(query, t) for t in texts])
-        points = [p for _, p in sorted(zip(scores, points), key=lambda x: x[0], reverse=True)]
-        points = points[:n_results]
-    if not points:
-        return "No relevant passages found."
+        # Fetch a wider candidate pool so the reranker has more to work with
+        rerank_pool = max(n_results * 6, 30)
+        results = client.query_points(
+            collection_name=config.QDRANT_COLLECTION,
+            prefetch=[
+                Prefetch(query=dense_vec, using="dense", limit=rerank_pool),
+                Prefetch(query=sparse_q,  using="sparse", limit=rerank_pool),
+            ],
+            query=Fusion.RRF,
+            limit=rerank_pool,
+            query_filter=query_filter,
+            with_payload=True,
+        )
 
-    parts = []
-    for point in points:
-        p          = point.payload or {}
-        book_title = p.get("book_title", p.get("book", "Unknown"))
-        section    = p.get("section", "")
-        header     = f"[{book_title}" + (f" | {section}]" if section else "]")
-        parts.append(f"{header}\n{p.get('text', '')}")
+        points = results.points
+        if points:
+            texts  = [p.payload.get("text", "") for p in points]
+            scores = rerank_model.predict([(query, t) for t in texts])
+            points = [p for _, p in sorted(zip(scores, points), key=lambda x: x[0], reverse=True)]
+            points = points[:n_results]
+        if not points:
+            return "No relevant passages found."
 
-    return "\n\n---\n\n".join(parts)
+        parts = []
+        for point in points:
+            p          = point.payload or {}
+            book_title = p.get("book_title", p.get("book", "Unknown"))
+            section    = p.get("section", "")
+            header     = f"[{book_title}" + (f" | {section}]" if section else "]")
+            parts.append(f"{header}\n{p.get('text', '')}")
+
+        return "\n\n---\n\n".join(parts)
+
+    except Exception as exc:
+        logger.exception("Tool error: %s", exc)
+        return f"Knowledge base search failed: {exc}"

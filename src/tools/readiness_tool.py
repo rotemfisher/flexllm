@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro
+
+logger = logging.getLogger(__name__)
 
 
 @tool
@@ -61,4 +64,5 @@ def get_daily_readiness(date: str | None = None) -> str:
         )
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

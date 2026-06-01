@@ -13,6 +13,8 @@ import re
 import uuid
 from pathlib import Path
 
+from langsmith import traceable
+
 import pypdfium2 as pdfium
 import tiktoken
 import torch
@@ -525,6 +527,7 @@ def _layout_is_broken(markdown: str, pdf_path: Path) -> bool:
 
 # ── Per-book processing ───────────────────────────────────────────────────────
 
+@traceable(name="etl:embed_coaching_book", run_type="tool")
 def process_book(
     book: dict,
     client: QdrantClient,

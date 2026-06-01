@@ -1,6 +1,10 @@
+import logging
+
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro
+
+logger = logging.getLogger(__name__)
 
 
 def _fmt(seconds: int | None) -> str:
@@ -47,4 +51,5 @@ def get_vdot_paces(vdot: int) -> str:
         )
 
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

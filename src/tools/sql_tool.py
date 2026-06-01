@@ -1,9 +1,12 @@
 import json
+import logging
 import re
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro
+
+logger = logging.getLogger(__name__)
 
 _WRITE_OPS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE)\b",
@@ -46,4 +49,5 @@ def query_running_database(query: str) -> str:
             rows = [dict(r) for r in con.execute(query).fetchall()]
         return json.dumps(rows, default=str) if rows else "No results found."
     except Exception as exc:
+        logger.exception("Tool error: %s", exc)
         return f"Query error: {exc}"
