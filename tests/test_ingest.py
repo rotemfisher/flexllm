@@ -62,9 +62,9 @@ def test_dedup_indices_exist(temp_db):
 
 
 @pytest.mark.slow
-def test_xml_stream_populates_tables(temp_db):
+def test_xml_stream_populates_tables(temp_db, apple_health_xml):
     """A single XML pass must produce non-empty rows in every key table."""
-    HealthIngester(db=temp_db, xml=XML_FILE, export_dir=EXPORT_DIR)._stream_xml()
+    HealthIngester(db=temp_db, xml=apple_health_xml, export_dir=EXPORT_DIR)._stream_xml()
     counts = _row_counts(temp_db)
 
     assert counts["workouts"]       > 0, "Expected workouts"
@@ -77,12 +77,12 @@ def test_xml_stream_populates_tables(temp_db):
 
 
 @pytest.mark.slow
-def test_no_duplicates_on_rerun(temp_db):
+def test_no_duplicates_on_rerun(temp_db, apple_health_xml):
     """Running the ingester twice must leave every table count unchanged."""
-    HealthIngester(db=temp_db, xml=XML_FILE, export_dir=EXPORT_DIR)._stream_xml()
+    HealthIngester(db=temp_db, xml=apple_health_xml, export_dir=EXPORT_DIR)._stream_xml()
     after_run1 = _row_counts(temp_db)
 
-    HealthIngester(db=temp_db, xml=XML_FILE, export_dir=EXPORT_DIR)._stream_xml()
+    HealthIngester(db=temp_db, xml=apple_health_xml, export_dir=EXPORT_DIR)._stream_xml()
     after_run2 = _row_counts(temp_db)
 
     for table, n1 in after_run1.items():
@@ -93,9 +93,9 @@ def test_no_duplicates_on_rerun(temp_db):
 
 
 @pytest.mark.slow
-def test_gpx_and_tss(temp_db):
+def test_gpx_and_tss(temp_db, apple_health_xml):
     """GPX tracks must be linked to workouts; TSS must be set on workouts with HR."""
-    ingester = HealthIngester(db=temp_db, xml=XML_FILE, export_dir=EXPORT_DIR)
+    ingester = HealthIngester(db=temp_db, xml=apple_health_xml, export_dir=EXPORT_DIR)
     ingester._stream_xml()
     ingester._stream_gpx()
     ingester._compute_tss()

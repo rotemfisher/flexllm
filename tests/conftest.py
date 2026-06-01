@@ -86,6 +86,25 @@ def qdrant_col():
         client.close()
 
 
+# ── apple_health_xml ──────────────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def apple_health_xml():
+    """
+    Path to the Apple Health XML export.
+
+    Skips loudly if the file is absent so slow ingest tests are omitted in CI
+    where personal data is not available.
+    """
+    from etl.ingest_health import XML_FILE
+    if not XML_FILE.exists():
+        pytest.skip(
+            f"Apple Health XML not found ({XML_FILE.name}) "
+            "— run `python etl/ingest_health.py` first"
+        )
+    return XML_FILE
+
+
 # ── temp_db ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
