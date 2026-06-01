@@ -50,53 +50,53 @@ phasing, and meal plan generation.
 
 ---
 
-## 3. 4-Role coaching system — one agent, not four
+## 3. 4-Role coaching system — four specialist agents with handoffs
 
-**Decision:** A single LangGraph ReAct agent handles all four roles simultaneously
-rather than separate specialist agents.
+**Decision:** Four specialist LangGraph agents (Trainer, Physiotherapist, Recovery Coach,
+Dietitian) share a single `StateGraph`. Each agent has its own focused tool set and can
+hand off to any other agent via LangGraph's `Command` API.
 
-**Why:** The roles are deeply interdependent at every decision point.
-- A knee injury (Physio) changes what the Trainer prescribes.
-- A poor HRV reading (Recovery Coach) changes whether the Trainer's plan runs today.
-- A strength phase (Trainer) changes the Dietitian's macro targets.
+**Why four agents instead of one with all tools:**
+The roles are deeply interdependent but a single agent carrying all tools means the LLM
+must search 25+ tools on every turn — Qwen2.5:32b handles this poorly once tool names
+start colliding. Splitting to four agents:
+- Reduces the per-turn tool search space (7–16 tools per agent).
+- Makes each system prompt smaller and role-coherent.
+- Preserves cross-role continuity via shared `CoachState` and explicit handoff notes.
 
-Splitting into four agents would require constant cross-agent state synchronisation.
-A single agent with a well-ordered system prompt and 21 tools handles all roles
-from one context window, reading athlete data once per session and making
-holistic decisions.
+**Why not a supervisor / orchestrator agent:**
+A supervisor would add a full LLM call just to decide routing — expensive and slow on
+local hardware. The semantic router (see §17) handles first-turn routing with a 67MB
+embedding model in ~10ms, and subsequent turns stay with the current agent until it
+explicitly hands off.
 
-**Trade-off accepted:** 21 tools is a large tool list for a local LLM.
-Qwen2.5:32b handles it well; smaller models may struggle. The system prompt is
-structured as an ordered decision tree (onboarding → session start → situation rules)
-to reduce the model's search space.
+**Trade-off accepted:** A handoff forces the LLM to emit a `*_transfer` tool call as its
+only tool call in that turn. The conflict resolver in `graph.py` (`_resolve_tool_conflicts`)
+strips any domain tool calls that accidentally appear alongside a handoff, so the graph
+never enters an invalid state.
 
 ---
 
-## 4. Tool architecture — 21 tools, read/write separated
+## 4. Tool architecture — per-agent tool sets, read/write separated
 
-**Decision:** Tools are split into read tools (no side effects) and write tools (DB mutations).
-All share a single config object for DB and vector store paths.
+**Decision:** Each specialist agent gets a focused tool set. Tools are split into read
+(no side effects) and write (DB mutations). All share a single `config` object for paths.
 
-**Read tools (11):**
-`get_onboarding_status`, `get_fitness_assessments`, `get_daily_readiness`,
-`get_vdot_paces`, `get_active_injuries`, `get_injury_recovery_trend`,
-`get_recent_workouts`, `get_recent_strength_sets`, `get_current_workout_plan`,
-`get_nutrition_profile`, `get_progress_report`, `query_running_database`,
-`search_coaching_books`
+| Agent | Tools (incl. handoff) |
+|-------|-----------------------|
+| Trainer | 17 (`get_onboarding_status`, `log/get_fitness_assessments`, `get_vdot_paces`, `get_recent_workouts`, `log_workout_rpe_and_notes`, `get/log_strength_sets`, `save/get_current_workout_plan`, `replace_day_in_plan`, `update_planned_workout_status`, `get_progress_report`, `update_athlete_profile`, `search_coaching_books`, `query_running_database`, `trainer_transfer`) |
+| Physiotherapist | 12 (`get_active_injuries`, `get_injury_recovery_trend`, `log_injury`, `log_injury_checkin`, `resolve_injury`, `get_recent_workouts`, `save_workout_plan`, `replace_day_in_plan`, `update_planned_workout_status`, `search_coaching_books`, `physio_transfer`) |
+| Recovery Coach | 9 (`get_daily_readiness`, `get_recent_workouts`, `get_current_workout_plan`, `replace_day_in_plan`, `update_planned_workout_status`, `get_progress_report`, `search_coaching_books`, `recovery_transfer`) |
+| Dietitian | 8 (`get_nutrition_profile`, `get_daily_readiness`, `get_recent_workouts`, `update_athlete_profile`, `search_coaching_books`, `query_running_database`, `dietitian_transfer`) |
 
-**Write tools (8):**
-`log_fitness_assessment`, `log_injury`, `log_injury_checkin`,
-`log_workout_rpe_and_notes`, `log_strength_sets`, `save_workout_plan`,
-`update_planned_workout_status`
+**Why separate read/write:** Read tools open SQLite with `file:{path}?mode=ro` (read-only
+URI) as a runtime guard against accidental mutations. Write tools use a plain connection.
+All tools initialise `con = None` before the try block and check `if con: con.close()` in
+finally to guard against `NameError` on early returns.
 
-**Why separate:** Read tools use `file:{path}?mode=ro` (read-only SQLite URI) as
-a runtime guard against accidental writes. Write tools use a plain connection.
-All tools guard against `con.close()` NameError by initialising `con = None`
-before the try block and checking `if con: con.close()` in finally.
-
-**Config centralisation:** `src/config.py` resolves `DB_PATH` and `QDRANT_PATH`
-to absolute paths via `Path(__file__).parent.parent` so tools work regardless of
-the process working directory. Environment variables in `.env` can still override.
+**Config centralisation:** `src/config.py` resolves `DB_PATH` and `QDRANT_PATH` to
+absolute paths via `Path(__file__).parent.parent` so tools work regardless of CWD.
+`.env` variables can still override any setting.
 
 ---
 
@@ -337,7 +337,7 @@ and more reliable than a vector retrieval that might return a neighbouring row.
 FlexLLM/
 ├── data/
 │   ├── personal/                   # private — gitignored
-│   │   ├── running.db              # main SQLite database (all 18 tables)
+│   │   ├── running.db              # main SQLite + LangGraph checkpoint store
 │   │   └── apple_health_export/
 │   │       ├── ייצוא.xml           # raw Apple Health export
 │   │       └── workout-routes/     # GPX files
@@ -351,19 +351,30 @@ FlexLLM/
 │   └── schema.sql                  # Single source of truth for the DB schema
 ├── src/
 │   ├── agent/
-│   │   └── coach_agent.py          # LangGraph ReAct agent + athlete context loader
-│   ├── config.py                   # Centralised settings (absolute paths, model IDs)
+│   │   ├── coach_agent.py          # get_athlete_context() + build_coach_graph() entry points
+│   │   ├── graph.py                # LangGraph StateGraph: 4 agent nodes + 4 tool nodes
+│   │   ├── router.py               # Semantic entry router (bge-small cosine similarity)
+│   │   ├── handoffs.py             # 4 transfer tools returning LangGraph Command objects
+│   │   ├── memory.py               # SummaryStore: daily/weekly LLM-generated summaries
+│   │   ├── prompts.py              # Per-agent system prompt builders
+│   │   ├── trainer.py              # TRAINER_TOOLS list
+│   │   ├── physiotherapist.py      # PHYSIO_TOOLS list
+│   │   ├── recovery_coach.py       # RECOVERY_TOOLS list
+│   │   └── dietitian.py            # DIETITIAN_TOOLS list
+│   ├── config.py                   # Centralised settings (absolute paths, model IDs, LangSmith)
+│   ├── tracing.py                  # setup_tracing() + re-export of @traceable
 │   ├── models/
 │   │   └── agent_state.py          # CoachState TypedDict for LangGraph
 │   ├── promts/
-│   │   └── system_promt.py         # 4-role system prompt + all tool rules
+│   │   └── system_promt.py         # Legacy monolithic system prompt (kept for reference)
 │   └── tools/
 │       ├── assessment_tool.py      # get_onboarding_status, log/get_fitness_assessments
 │       ├── injury_tool.py          # get_active_injuries, get_injury_recovery_trend
-│       ├── injury_write_tool.py    # log_injury, log_injury_checkin
+│       ├── injury_write_tool.py    # log_injury, log_injury_checkin, resolve_injury
 │       ├── log_workout_feedback_tool.py  # log_workout_rpe_and_notes
 │       ├── nutrition_tool.py       # get_nutrition_profile
-│       ├── plan_tool.py            # save/get_workout_plan, update_planned_workout_status
+│       ├── plan_tool.py            # save/get_workout_plan, replace_day_in_plan, update_planned_workout_status
+│       ├── profile_tool.py         # update_athlete_profile
 │       ├── progress_tool.py        # get_progress_report
 │       ├── rag_tool.py             # search_coaching_books (hybrid RAG)
 │       ├── readiness_tool.py       # get_daily_readiness
@@ -373,10 +384,244 @@ FlexLLM/
 │       └── workout_history_tool.py # get_recent_workouts
 ├── tests/
 │   └── test_ingest.py              # Smoke tests for the ETL pipeline
-├── cli.py                          # Interactive CLI entry point
+├── src/cli.py                      # Interactive CLI entry point (streaming output)
 └── DECISIONS.md                    # This file
 ```
 
 **Why `data/personal/` for the DB:** The database contains personal health data.
 Keeping it co-located with the raw Apple Health export makes the gitignore rule
 simple (`data/personal/`) and makes it obvious what is sensitive.
+
+**`running.db` doubles as the LangGraph checkpoint store:** `SqliteSaver` writes its
+`checkpoints` and `checkpoint_blobs` tables into the same file. No second DB file needed;
+the WAL mode already handles concurrent access from the checkpointer and the tool layer.
+
+---
+
+## 16. Multi-agent graph topology
+
+**Decision:** `src/agent/graph.py` builds a `StateGraph` with 4 agent nodes and 4 tool
+nodes. Each agent owns an exclusive tool node so tools never cross-contaminate.
+
+```
+START
+  │ (conditional — semantic router or active_agent)
+  ├─▶ trainer         ──▶ trainer_tools   ──▶ trainer
+  ├─▶ physiotherapist ──▶ physio_tools    ──▶ physiotherapist
+  ├─▶ recovery_coach  ──▶ recovery_tools  ──▶ recovery_coach
+  └─▶ dietitian       ──▶ dietitian_tools ──▶ dietitian
+                                                │ (when last msg has no tool_calls)
+                                               END
+```
+
+**Why separate tool nodes per agent:** LangGraph's `ToolNode` routes by the tool name in
+the last `AIMessage.tool_calls`. If all agents shared one tool node, a handoff tool call
+could be dispatched alongside the previous agent's domain tools — producing an invalid
+`ToolMessage` sequence. Per-agent nodes guarantee that only the calling agent's tools are
+ever invoked in that arm.
+
+**`_MAX_HISTORY_MESSAGES = 30`** (in `graph.py`): The context sent to the LLM is trimmed
+to the 30 most recent messages. This fits inside Qwen2.5:32b's `NUM_CTX=16384` budget even
+with tool call pairs. The trim logic walks forward past any leading `ToolMessage` to avoid
+an orphaned tool result without its parent `AIMessage`.
+
+**Context window per agent node (`_make_agent_node`):**
+```
+[SystemMessage(role_prompt + athlete_context + handoff_reason)]
++ trimmed_history
+```
+The `handoff_reason` is appended to the system prompt when `state["handoff_reason"]`
+is set, giving the receiving agent a compact clinical briefing without re-injecting the
+full conversation.
+
+---
+
+## 17. Semantic entry router
+
+**Decision:** `src/agent/router.py` routes the first turn of each session using cosine
+similarity between the user's message and per-domain anchor sentences embedded with
+`BAAI/bge-small-en-v1.5` (67MB ONNX, via `fastembed`).
+
+**Two-phase routing:**
+1. **Mid-session (active_agent set):** `route_entry` returns `state["active_agent"]`
+   immediately — no embedding call. This preserves handoff decisions across turns.
+2. **Session start (active_agent not set):** Embed the latest human message, compute
+   cosine similarity against the mean embedding of each domain's anchor bank, pick the
+   closest domain.
+
+**Anchor bank design:** Each domain has 14–21 representative sentences covering diverse
+phrasings of real user requests. The mean anchor vector approximates the centroid of that
+domain's intent space. More diverse anchors → better coverage of edge-case phrasing.
+
+**Why bge-small, not bge-large:** The router fires on every session start. bge-small
+(67MB) loads in ~2s cold and embeds a sentence in <10ms. bge-large (1.3GB) is already
+loaded for RAG; running it synchronously in the router on the same process would compete
+for GPU VRAM. The routing task only needs coarse-grained intent classification, not the
+fine-grained semantic similarity that RAG retrieval requires.
+
+**Model and anchor embeddings are `lru_cache(maxsize=1)` cached** — loaded once per
+process, never recomputed between turns.
+
+---
+
+## 18. Agent handoffs — LangGraph Command API
+
+**Decision:** Each agent has one `*_transfer` tool that returns a `Command(goto=target,
+update={...})`. LangGraph intercepts the `Command` and re-routes the graph without
+returning to the calling agent node.
+
+```python
+# Example: trainer hands off to physiotherapist
+return Command(
+    goto="physiotherapist",
+    update={"active_agent": "physiotherapist", "handoff_reason": "<clinical note>"}
+)
+```
+
+**Why Command instead of a state flag + conditional edge:**
+A state-flag approach would need the ToolNode to process the handoff tool, write a flag,
+return to the agent node, then have the agent node emit no tool calls so a conditional
+edge can route to the next agent. That is three extra graph steps and one extra LLM call.
+`Command` exits the ToolNode directly to the target node — zero extra LLM calls.
+
+**Conflict resolver (`_resolve_tool_conflicts` in `graph.py`):**
+LLMs occasionally emit a handoff tool call alongside a domain tool call in the same
+response despite instructions not to. Keeping both causes LangGraph to try to return a
+`ToolMessage` next to a `Command`, which is undefined behaviour. The conflict resolver
+inspects `response.tool_calls`, detects any handoff name in `_HANDOFF_TOOL_NAMES`, and
+drops all non-handoff calls from that response before it reaches the ToolNode.
+
+**Handoff state fields (in `CoachState`):**
+- `active_agent` — persisted across turns so the router re-enters the same agent on the
+  next human message. Reset to `None` only when the session ends.
+- `handoff_reason` — a concise clinical note set by the transfer tool, injected into the
+  receiving agent's system prompt, then cleared to `None` so it does not pollute
+  subsequent turns.
+
+---
+
+## 19. LangSmith tracing
+
+**Decision:** `src/tracing.py` activates LangSmith when `LANGSMITH_API_KEY` is present
+in `.env`. LangChain/LangGraph read tracing config from `os.environ`, not from Pydantic
+`Settings`, so `setup_tracing()` explicitly writes five env vars.
+
+**Key env vars set by `setup_tracing()`:**
+
+| Variable | Value |
+|----------|-------|
+| `LANGSMITH_API_KEY` | from `config.LANGSMITH_API_KEY` |
+| `LANGCHAIN_TRACING_V2` | `"true"` |
+| `LANGCHAIN_PROJECT` | `config.LANGCHAIN_PROJECT` (default `"flexllm-coach-local"`) |
+| `LANGCHAIN_CALLBACKS_BACKGROUND` | `"true"` — traces ship in a background thread |
+| `LANGCHAIN_TAGS` | `config.ENVIRONMENT` — tags every run for easy filter in the UI |
+
+**Why background callbacks:** The main thread runs an interactive CLI. Blocking to flush
+traces on each LLM call would add latency the user would feel. Background shipping means
+trace data may be lost on a hard crash, but for a local personal tool that trade-off is
+acceptable.
+
+**`@traceable` decorator:** Re-exported from `src/tracing.py` as a single import point.
+Applied to `get_athlete_context()` with `run_type="retriever"` so the LangSmith UI
+groups it correctly alongside LangGraph's auto-instrumented node spans.
+
+**Test isolation:** `setup_tracing(project="flexllm-test")` is called from `conftest.py`
+so test traces land in a separate LangSmith project and never pollute production run
+history.
+
+**`ENVIRONMENT` config field** (`local` | `dev` | `staging` | `prod`): Tags every span.
+Useful when the same LangSmith project receives traces from multiple deployment contexts.
+
+**CLI metadata on every `graph.stream()` call** (`src/cli.py`):
+```python
+run_config = {
+    "run_name": f"coaching-{THREAD_ID}",
+    "tags": [config.ENVIRONMENT, "cli", config.MODEL_ID],
+    "metadata": {
+        "source": "cli",
+        "session_id": session_id,   # uuid4 hex, unique per CLI invocation
+        "thread_id": THREAD_ID,
+        "model": config.MODEL_ID,
+        "environment": config.ENVIRONMENT,
+    },
+}
+```
+This makes every LangSmith trace filterable by session, model, and environment without
+any manual annotation inside the agent code.
+
+---
+
+## 20. Conversation memory — LLM-generated summaries
+
+**Decision:** `src/agent/memory.py` compresses session messages into bullet-point daily
+summaries, stored in a `conversation_summaries` SQLite table. At session start these
+summaries are injected into `athlete_context` so every agent has long-term memory without
+replaying the full raw message history.
+
+**Why not raw message history:** The LangGraph `SqliteSaver` checkpointer persists raw
+messages, but injecting hundreds of turns into each prompt would overflow the context
+window quickly. Summaries trade recall precision for unlimited effective memory horizon.
+
+**Summary hierarchy:**
+
+| Type | Row per | Content | Trigger |
+|------|---------|---------|---------|
+| `daily` | `(date, domain)` | 3–5 bullet points from one session | End of each CLI session |
+| `weekly` | `(week_start, "all")` | Cross-domain consolidated view | Regenerated when `daily` rows ≥ 2 and no weekly exists for the week |
+
+**Dedup key:** `UNIQUE(summary_date, domain, summary_type) ON CONFLICT REPLACE` — re-running
+end-of-session summarisation overwrites the existing daily note rather than creating
+duplicates.
+
+**`format_for_context()` injection order:**
+```
+=== THIS WEEK'S COACHING SUMMARY ===
+<weekly text>
+
+=== RECENT SESSION NOTES (last 7 days) ===
+[2026-05-30 / trainer] • ...
+[2026-05-31 / recovery_coach] • ...
+```
+The weekly summary gives the agent a stable high-level view; the daily notes give recency.
+Both are prepended to the athlete profile block in `athlete_context`.
+
+**Minimum message threshold:** `save_session_summary()` requires ≥ 4 messages before
+summarising (system + human + AI reply + one more exchange). Shorter sessions — e.g. a
+single quick question — are not worth a round-trip LLM summarisation call.
+
+**Week start convention:** Israeli Sunday-based weeks (`_week_start(d)` returns `d -
+timedelta(days=(d.weekday() + 1) % 7)`). Consistent with how the athlete thinks about
+training weeks.
+
+---
+
+## 21. CoachState schema and checkpointing
+
+**Decision:** `CoachState` is a minimal `TypedDict` with three fields:
+
+```python
+class CoachState(TypedDict):
+    messages:        Annotated[Sequence[BaseMessage], add_messages]
+    athlete_context: str   # injected once per session from get_athlete_context()
+    active_agent:    str   # "trainer" | "physiotherapist" | "recovery_coach" | "dietitian"
+    handoff_reason:  str   # set by transfer tools, cleared after one agent turn
+```
+
+**`add_messages` reducer:** LangGraph merges new messages into the existing list rather
+than replacing it. This means each `graph.stream()` call appends to the checkpoint rather
+than rewriting the full history — critical for performance as conversation grows.
+
+**`athlete_context` is not checkpointed between sessions:** It is passed freshly on every
+`graph.stream()` call. This means profile changes (new goal, updated fitness level) take
+effect immediately without needing to invalidate the checkpoint. The checkpoint only
+carries `messages` and the routing fields.
+
+**`SqliteSaver` checkpointer:** `build_multi_agent_graph()` is a context manager that
+opens a `SqliteSaver` from `config.DB_PATH` (the same `running.db`), compiles the graph
+with it, yields, then closes the connection. This ensures the SQLite connection is never
+left open after the CLI exits.
+
+**Thread ID:** The CLI uses `THREAD_ID = "default"` — a single persistent conversation
+thread per athlete. Every session continues from where the last one ended. The
+`session_id` (UUID) in `run_config.metadata` distinguishes individual CLI invocations
+within that thread in LangSmith without branching the checkpoint graph.

@@ -5,6 +5,9 @@ from src.config import config
 from src.agent.graph import build_multi_agent_graph
 from src.agent.memory import SummaryStore
 from src.tracing import traceable
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @traceable(name="get_athlete_context", run_type="retriever")
@@ -25,6 +28,7 @@ def get_athlete_context() -> str:
         ).fetchone()
         con.close()
     except Exception as exc:
+        logger.error("Failed to load profile", exc_info=True)
         return f"(Unable to load athlete profile: {exc})"
 
     if not profile:
@@ -44,7 +48,8 @@ def get_athlete_context() -> str:
         summary_block = store.format_for_context()
         if summary_block:
             parts.append(summary_block)
-    except Exception:
+    except Exception as exc:
+        logger.error("Failed to load summaries", exc_info=True)
         pass  # Summaries are best-effort; never block session startup.
 
     return "\n\n".join(parts)
