@@ -26,4 +26,4 @@ jobs:
       - name: Run tests
         env:
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-        run: pytest --tb=short -v
+        run: python -m pytest --tb=short -v
