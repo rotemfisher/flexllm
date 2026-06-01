@@ -1,0 +1,84 @@
+services:
+
+  # ── Python FastAPI — LangGraph coaching agent ────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flexllm-api
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: prod
+      DB_PATH: /data/personal/running.db
+      QDRANT_PATH: /data/qdrant_db
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-coaching_books}
+      MODEL_ID: ${MODEL_ID:-qwen2.5:32b}
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-large-en-v1.5}
+      # Ollama runs on the host machine (GPU access). host.docker.internal resolves
+      # to the host on Docker Desktop (Mac/Win). On Linux, extra_hosts maps it below.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      WHATSAPP_BRIDGE_URL: http://whatsapp:3001
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET must be set in .env}
+      ALLOWED_NUMBERS: ${ALLOWED_NUMBERS:-}
+      SESSION_TIMEOUT_MINUTES: ${SESSION_TIMEOUT_MINUTES:-60}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-flexllm-prod}
+    volumes:
+      # Mount your data directory so the container reads the real DB and Qdrant store.
+      - ./data:/data:rw
+      # Mount the embedding model cache to avoid re-downloading on every restart.
+      - model_cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    networks:
+      - flexllm
+    # Allow the API to reach Ollama on the host (Linux only; Docker Desktop auto-resolves).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      start_period: 180s
+      retries: 5
+
+  # ── Node.js WhatsApp Web bridge ───────────────────────────────────────────────
+  whatsapp:
+    build:
+      context: ./whatsapp
+      dockerfile: Dockerfile
+    container_name: flexllm-whatsapp
+    restart: unless-stopped
+    environment:
+      PYTHON_API_URL: http://api:8000
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET must be set in .env}
+      PORT: 3001
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_ENV: production
+    volumes:
+      # Persist the WhatsApp Web session so you only scan the QR code once.
+      - whatsapp_auth:/app/.wwebjs_auth
+    networks:
+      - flexllm
+    # The bridge must not start forwarding messages before the API is accepting requests.
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e",
+             "require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+
+volumes:
+  whatsapp_auth:
+    name: flexllm-whatsapp-auth
+  model_cache:
+    name: flexllm-model-cache
+
+networks:
+  flexllm:
+    driver: bridge

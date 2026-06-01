@@ -27,6 +27,7 @@ from src.agent.graph import (
 from src.agent.handoffs import (
     dietitian_transfer,
     physio_transfer,
+    psychologist_transfer,
     recovery_transfer,
     trainer_transfer,
 )
@@ -41,6 +42,7 @@ from src.agent.memory import (
 from src.agent.prompts import (
     build_dietitian_prompt,
     build_physio_prompt,
+    build_psychologist_prompt,
     build_recovery_prompt,
     build_trainer_prompt,
 )
@@ -276,21 +278,52 @@ class TestHandoffs:
         assert isinstance(result, Command)
         assert result.goto == "trainer"
 
+    def test_psychologist_transfer_returns_command(self):
+        result = psychologist_transfer.invoke({"target": "trainer", "reason": "mental skills addressed"})
+        assert isinstance(result, Command)
+        assert result.goto == "trainer"
+
+    def test_psychologist_transfer_to_recovery(self):
+        result = psychologist_transfer.invoke({"target": "recovery_coach", "reason": "burnout"})
+        assert result.goto == "recovery_coach"
+        assert result.update["active_agent"] == "recovery_coach"
+        assert result.update["handoff_reason"] == "burnout"
+
+    def test_trainer_can_transfer_to_psychologist(self):
+        result = trainer_transfer.invoke({"target": "psychologist", "reason": "motivation loss"})
+        assert isinstance(result, Command)
+        assert result.goto == "psychologist"
+        assert result.update["active_agent"] == "psychologist"
+
+    def test_physio_can_transfer_to_psychologist(self):
+        result = physio_transfer.invoke({"target": "psychologist", "reason": "fear of re-injury"})
+        assert result.goto == "psychologist"
+
+    def test_recovery_can_transfer_to_psychologist(self):
+        result = recovery_transfer.invoke({"target": "psychologist", "reason": "burnout stress"})
+        assert result.goto == "psychologist"
+
+    def test_dietitian_can_transfer_to_psychologist(self):
+        result = dietitian_transfer.invoke({"target": "psychologist", "reason": "disordered eating concern"})
+        assert result.goto == "psychologist"
+
     @pytest.mark.parametrize("fn,target", [
-        (trainer_transfer,  "physiotherapist"),
-        (physio_transfer,   "trainer"),
-        (recovery_transfer, "trainer"),
-        (dietitian_transfer, "trainer"),
+        (trainer_transfer,      "physiotherapist"),
+        (physio_transfer,       "trainer"),
+        (recovery_transfer,     "trainer"),
+        (dietitian_transfer,    "trainer"),
+        (psychologist_transfer, "trainer"),
     ])
     def test_all_transfers_store_reason_in_update(self, fn, target):
         result = fn.invoke({"target": target, "reason": "test reason"})
         assert result.update["handoff_reason"] == "test reason"
 
     @pytest.mark.parametrize("fn,target", [
-        (trainer_transfer,  "physiotherapist"),
-        (physio_transfer,   "trainer"),
-        (recovery_transfer, "trainer"),
-        (dietitian_transfer, "trainer"),
+        (trainer_transfer,      "physiotherapist"),
+        (physio_transfer,       "trainer"),
+        (recovery_transfer,     "trainer"),
+        (dietitian_transfer,    "trainer"),
+        (psychologist_transfer, "trainer"),
     ])
     def test_all_transfers_update_active_agent(self, fn, target):
         result = fn.invoke({"target": target, "reason": "reason"})
@@ -332,10 +365,11 @@ class TestCosine:
 
 # Orthogonal unit vectors — each clearly closest to its own domain.
 _MOCK_DOMAIN_VECS = {
-    "physiotherapist": np.array([1.0, 0.0, 0.0, 0.0]),
-    "trainer":         np.array([0.0, 1.0, 0.0, 0.0]),
-    "recovery_coach":  np.array([0.0, 0.0, 1.0, 0.0]),
-    "dietitian":       np.array([0.0, 0.0, 0.0, 1.0]),
+    "physiotherapist": np.array([1.0, 0.0, 0.0, 0.0, 0.0]),
+    "trainer":         np.array([0.0, 1.0, 0.0, 0.0, 0.0]),
+    "recovery_coach":  np.array([0.0, 0.0, 1.0, 0.0, 0.0]),
+    "dietitian":       np.array([0.0, 0.0, 0.0, 1.0, 0.0]),
+    "psychologist":    np.array([0.0, 0.0, 0.0, 0.0, 1.0]),
 }
 
 
@@ -364,7 +398,7 @@ class TestRouteEntry:
             result = route_entry(state)
         assert result == "dietitian"
 
-    @pytest.mark.parametrize("domain", ["physiotherapist", "trainer", "recovery_coach", "dietitian"])
+    @pytest.mark.parametrize("domain", ["physiotherapist", "trainer", "recovery_coach", "dietitian", "psychologist"])
     def test_semantic_routing_picks_closest_domain(self, domain):
         mock_model, domain_vecs = _mock_load(domain)
         state = {"messages": [_human("some message")], "active_agent": ""}
@@ -607,10 +641,11 @@ class TestSaveSessionSummary:
 
 class TestPrompts:
     @pytest.mark.parametrize("builder,label", [
-        (build_trainer_prompt,    "TRAINER"),
-        (build_physio_prompt,     "PHYSIOTHERAPIST"),
-        (build_recovery_prompt,   "RECOVERY COACH"),
-        (build_dietitian_prompt,  "DIETITIAN"),
+        (build_trainer_prompt,      "TRAINER"),
+        (build_physio_prompt,       "PHYSIOTHERAPIST"),
+        (build_recovery_prompt,     "RECOVERY COACH"),
+        (build_dietitian_prompt,    "DIETITIAN"),
+        (build_psychologist_prompt, "PSYCHOLOGIST"),
     ])
     def test_prompt_contains_agent_label(self, builder, label):
         assert label in builder("")
@@ -620,6 +655,7 @@ class TestPrompts:
         build_physio_prompt,
         build_recovery_prompt,
         build_dietitian_prompt,
+        build_psychologist_prompt,
     ])
     def test_prompt_includes_athlete_context(self, builder):
         ctx = "Athlete: 32yo marathon runner"
@@ -630,6 +666,7 @@ class TestPrompts:
         build_physio_prompt,
         build_recovery_prompt,
         build_dietitian_prompt,
+        build_psychologist_prompt,
     ])
     def test_prompt_includes_behaviour_section(self, builder):
         assert "BEHAVIOUR" in builder("")
@@ -639,6 +676,7 @@ class TestPrompts:
         build_physio_prompt,
         build_recovery_prompt,
         build_dietitian_prompt,
+        build_psychologist_prompt,
     ])
     def test_prompt_includes_calendar_convention(self, builder):
         assert "CALENDAR CONVENTION" in builder("")
@@ -648,6 +686,7 @@ class TestPrompts:
         build_physio_prompt,
         build_recovery_prompt,
         build_dietitian_prompt,
+        build_psychologist_prompt,
     ])
     def test_prompt_includes_handoff_triggers(self, builder):
         assert "HANDOFF TRIGGERS" in builder("")
@@ -663,3 +702,9 @@ class TestPrompts:
 
     def test_dietitian_prompt_contains_calculation_protocol(self):
         assert "CALCULATION PROTOCOL" in build_dietitian_prompt("")
+
+    def test_psychologist_prompt_contains_assessment_framework(self):
+        assert "ASSESSMENT FRAMEWORK" in build_psychologist_prompt("")
+
+    def test_psychologist_prompt_contains_intervention_menu(self):
+        assert "INTERVENTION MENU" in build_psychologist_prompt("")

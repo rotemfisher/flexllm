@@ -1,4 +1,6 @@
 from .rag_tool import search_coaching_books
+from .psych_tool import get_situational_psych_tips, search_psychology_books
+from .sport_radar_tool import check_upcoming_race_or_test, check_training_anomaly
 from .sql_tool import query_running_database
 from .vdot_tool import get_vdot_paces
 from .readiness_tool import get_daily_readiness
@@ -17,6 +19,12 @@ __all__ = [
     # RAG & SQL
     "search_coaching_books",
     "query_running_database",
+    # Psychology
+    "get_situational_psych_tips",
+    "search_psychology_books",
+    # Proactive detection
+    "check_upcoming_race_or_test",
+    "check_training_anomaly",
     # Readiness & health
     "get_daily_readiness",
     "get_vdot_paces",

@@ -93,6 +93,25 @@ _DOMAIN_ANCHORS: dict[str, list[str]] = {
         "I am preparing for a marathon",
         "How do I periodise my training",
     ],
+    "psychologist": [
+        "I have no motivation to train",
+        "I am scared of failing in my race",
+        "I feel anxious before competitions",
+        "I cannot stay focused during my runs",
+        "I lost my confidence after a bad race",
+        "I keep giving up when it gets hard",
+        "I feel mentally burned out from sport",
+        "I have negative self-talk during workouts",
+        "I need help with mental toughness",
+        "I am struggling with performance anxiety",
+        "I freeze under pressure during races",
+        "How do I use visualization or mental imagery",
+        "I am dealing with a performance slump",
+        "I feel like I am not good enough",
+        "How do I set better goals for my training",
+        "I struggle to stay consistent with my training",
+        "I cannot handle the pressure of competition",
+    ],
 }
 
 _ROUTER_MODEL = "BAAI/bge-small-en-v1.5"

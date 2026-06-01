@@ -24,7 +24,10 @@ EMBEDDED_BOOKS = {
     "strength", "periodization", "nsca",
     "sport_nutrition", "clinical_sports_nutrition",
 }
-PENDING_BOOKS = {"physiology_sport", "clinical_sports_medicine"}
+PENDING_BOOKS = {
+    "physiology_sport", "clinical_sports_medicine",
+    "champions_mind", "applied_sport_psych", "foundations_sport_psych",
+}
 
 EXPECTED_CATEGORIES   = {"running", "fitness", "nutrition", "physiology"}
 EMBEDDING_DIM         = 1024
@@ -40,6 +43,10 @@ MIN_CHUNKS_PER_BOOK = {
     "nsca":                      400,
     "sport_nutrition":           400,
     "clinical_sports_nutrition": 700,
+    # psychology books (skip gracefully when not yet embedded)
+    "champions_mind":            100,
+    "applied_sport_psych":       200,
+    "foundations_sport_psych":   300,
 }
 
 
@@ -336,21 +343,123 @@ def test_science_run_internal_retrieval(qdrant_col, query_text, expected_keyword
     This proves the chunks themselves are semantically meaningful.
     """
     client, dense, sparse, _ = qdrant_col
-    
+
     points = _hybrid_query(
-        client, dense, sparse, query_text, 
-        n_results=3, 
+        client, dense, sparse, query_text,
+        n_results=3,
         book_filter="science_run"
     )
-    
+
     assert len(points) > 0, f"No chunks returned for {query_text} inside science_run!"
-    
+
     retrieved_texts = [p.payload.get("text", "").lower() for p in points if p.payload]
     keyword_found = any(expected_keyword in text for text in retrieved_texts)
-    
+
     assert keyword_found, (
         f"The embeddings for 'science_run' might be diluted. \n"
         f"Queried: '{query_text}'.\n"
         f"Expected to find a chunk containing '{expected_keyword}', but got:\n"
+        f"{[t[:100] + '...' for t in retrieved_texts]}"
+    )
+
+
+# ─── Psychology book tests ────────────────────────────────────────────────────
+
+_PSYCH_BOOKS = {"champions_mind", "applied_sport_psych", "foundations_sport_psych"}
+
+
+def test_psychology_books_pending_status(qdrant_col):
+    """Report which psychology books are embedded and skip gracefully when none are."""
+    client, *_ = qdrant_col
+    found    = _books_present(client)
+    embedded = _PSYCH_BOOKS & found
+    missing  = _PSYCH_BOOKS - found
+    if missing:
+        pytest.skip(
+            f"Psychology books not yet embedded: {missing}. "
+            f"Run `python etl/embed_books.py` to embed them. "
+            f"Already embedded: {embedded or 'none'}."
+        )
+
+
+def test_psychology_category_present(qdrant_col):
+    """Once any psychology book is embedded the 'psychology' category must appear."""
+    client, *_ = qdrant_col
+    found = _books_present(client)
+    if not (_PSYCH_BOOKS & found):
+        pytest.skip("No psychology books embedded yet")
+    points = _scroll_all(client, with_payload=True)
+    cats = {p.payload["category"] for p in points if p.payload}
+    assert "psychology" in cats, (
+        "Psychology books are embedded but 'psychology' category not found in collection."
+    )
+
+
+def test_hybrid_mental_toughness_query(qdrant_col):
+    """'mental toughness confidence resilience athlete' must return a psychology chunk."""
+    client, *_ = qdrant_col
+    if not (_PSYCH_BOOKS & _books_present(client)):
+        pytest.skip("No psychology books embedded yet")
+    client, dense, sparse, _ = qdrant_col
+    points = _hybrid_query(client, dense, sparse,
+                           "mental toughness confidence resilience athlete", n_results=5)
+    cats = [p.payload.get("category") for p in points if p.payload]
+    assert "psychology" in cats, (
+        f"No psychology result in top 5 for mental toughness query. "
+        f"Got: {[p.payload.get('book') for p in points]}"
+    )
+
+
+def test_hybrid_performance_anxiety_query(qdrant_col):
+    """'pre-competition anxiety arousal control pressure' must return a psychology chunk."""
+    client, *_ = qdrant_col
+    if not (_PSYCH_BOOKS & _books_present(client)):
+        pytest.skip("No psychology books embedded yet")
+    client, dense, sparse, _ = qdrant_col
+    points = _hybrid_query(client, dense, sparse,
+                           "pre-competition anxiety arousal control pressure", n_results=5)
+    cats = [p.payload.get("category") for p in points if p.payload]
+    assert "psychology" in cats, (
+        f"No psychology result for anxiety query. "
+        f"Got: {[p.payload.get('book') for p in points]}"
+    )
+
+
+def test_hybrid_goal_setting_query(qdrant_col):
+    """'goal setting motivation intrinsic extrinsic sport' must return psychology in top 5."""
+    client, *_ = qdrant_col
+    if not (_PSYCH_BOOKS & _books_present(client)):
+        pytest.skip("No psychology books embedded yet")
+    client, dense, sparse, _ = qdrant_col
+    points = _hybrid_query(client, dense, sparse,
+                           "goal setting motivation intrinsic extrinsic sport", n_results=5)
+    cats = [p.payload.get("category") for p in points if p.payload]
+    assert "psychology" in cats, (
+        f"No psychology result for goal setting query. "
+        f"Got: {[p.payload.get('book') for p in points]}"
+    )
+
+
+@pytest.mark.parametrize("book_key,query_text,expected_keyword", [
+    ("champions_mind",         "champion mindset elite athlete think train thrive", "champion"),
+    ("applied_sport_psych",    "imagery visualization mental rehearsal performance",  "imager"),
+    ("foundations_sport_psych","self-efficacy confidence Bandura sport psychology",   "efficac"),
+])
+def test_psychology_book_internal_retrieval(qdrant_col, book_key, query_text, expected_keyword):
+    """Each psychology book must return semantically relevant chunks for domain queries."""
+    client, dense, sparse, _ = qdrant_col
+    _skip_if_book_missing(client, book_key)
+    points = _hybrid_query(
+        client, dense, sparse, query_text,
+        n_results=3,
+        book_filter=book_key,
+    )
+    assert len(points) > 0, f"No chunks returned for '{query_text}' inside '{book_key}'"
+    retrieved_texts = [p.payload.get("text", "").lower() for p in points if p.payload]
+    keyword_found = any(expected_keyword in text for text in retrieved_texts)
+    assert keyword_found, (
+        f"Book '{book_key}' embeddings may be poor.\n"
+        f"Queried: '{query_text}'.\n"
+        f"Expected keyword '{expected_keyword}' in results but got:\n"
         f"{[t[:100] + '...' for t in retrieved_texts]}"
     )

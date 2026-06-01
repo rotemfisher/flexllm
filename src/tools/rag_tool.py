@@ -10,6 +10,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     Fusion,
+    FusionQuery,
     MatchValue,
     Prefetch,
     SparseVector,
@@ -67,6 +68,12 @@ def search_coaching_books(query: str, book_filter: str | None = None, n_results:
     Physiology:
     - "physiology_sport"          → Physiology of Sport and Exercise
     - "clinical_sports_medicine"  → Clinical Sports Medicine (Khan)
+    Psychology:
+    - "champions_mind"            → The Champion's Mind (mindset, mental toughness, peak performance)
+    - "applied_sport_psych"       → Applied Sport Psychology (anxiety, confidence, imagery)
+    - "foundations_sport_psych"   → Foundations of Sport and Exercise Psychology (theory, motivation)
+
+    For psychology queries prefer search_psychology_books — it filters by category and reranks within the psychology corpus.
 
     For ISSN position-stand articles (caffeine, creatine, protein, beta-alanine,
     omega-3, ketogenic diets, etc.) do NOT use book_filter — query broadly and
@@ -101,7 +108,7 @@ def search_coaching_books(query: str, book_filter: str | None = None, n_results:
                 Prefetch(query=dense_vec, using="dense", limit=rerank_pool),
                 Prefetch(query=sparse_q,  using="sparse", limit=rerank_pool),
             ],
-            query=Fusion.RRF,
+            query=FusionQuery(fusion=Fusion.RRF),
             limit=rerank_pool,
             query_filter=query_filter,
             with_payload=True,

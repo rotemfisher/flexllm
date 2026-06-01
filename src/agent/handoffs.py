@@ -6,7 +6,7 @@ from langgraph.types import Command
 
 @tool
 def trainer_transfer(
-    target: Literal["physiotherapist", "recovery_coach", "dietitian"],
+    target: Literal["physiotherapist", "recovery_coach", "dietitian", "psychologist"],
     reason: str,
 ) -> Command:
     """
@@ -21,6 +21,7 @@ def trainer_transfer(
       "physiotherapist"  : athlete reports pain, injury, or movement limitation
       "recovery_coach"   : TSB < -20, HRV critically low, sleep < 5h, or fatigue-only topic
       "dietitian"        : nutrition, meal planning, macros, weight management, fuelling
+      "psychologist"     : mental blocks, anxiety, motivation loss, confidence issues, performance slump
 
     reason — concise handoff note for the receiving agent (key values, clinical context).
     """
@@ -30,7 +31,7 @@ def trainer_transfer(
 
 @tool
 def physio_transfer(
-    target: Literal["trainer", "recovery_coach", "dietitian"],
+    target: Literal["trainer", "recovery_coach", "dietitian", "psychologist"],
     reason: str,
 ) -> Command:
     """
@@ -45,6 +46,7 @@ def physio_transfer(
       "trainer"          : injury resolved, athlete cleared — include return-to-train protocol in reason
       "recovery_coach"   : accumulated fatigue is the root cause of the injury
       "dietitian"        : dietary support needed (collagen synthesis, anti-inflammatory nutrition)
+      "psychologist"     : fear of re-injury, confidence loss, or chronic pain affecting mental state
 
     reason — handoff note with return-to-train restrictions or clinical context for the receiving agent.
     """
@@ -53,7 +55,7 @@ def physio_transfer(
 
 @tool
 def recovery_transfer(
-    target: Literal["trainer", "physiotherapist", "dietitian"],
+    target: Literal["trainer", "physiotherapist", "dietitian", "psychologist"],
     reason: str,
 ) -> Command:
     """
@@ -68,6 +70,7 @@ def recovery_transfer(
       "trainer"          : readiness assessed, session modification determined, back to training
       "physiotherapist"  : fatigue symptoms may indicate an underlying injury
       "dietitian"        : under-fuelling or caloric deficit is driving poor recovery
+      "psychologist"     : psychological stress or burnout is the primary recovery barrier
 
     reason — handoff note with TSB, HRV, and sleep values plus clinical rationale.
     """
@@ -76,7 +79,7 @@ def recovery_transfer(
 
 @tool
 def dietitian_transfer(
-    target: Literal["trainer", "physiotherapist", "recovery_coach"],
+    target: Literal["trainer", "physiotherapist", "recovery_coach", "psychologist"],
     reason: str,
 ) -> Command:
     """
@@ -91,7 +94,32 @@ def dietitian_transfer(
       "trainer"          : nutrition plan set, athlete has training or workout questions
       "physiotherapist"  : dietary topic intersects with injury (bone stress, tendon, inflammation)
       "recovery_coach"   : nutrition question relates to sleep quality, HRV, or recovery capacity
+      "psychologist"     : disordered eating pattern, body image concern, or emotional eating
 
     reason — handoff note with nutritional context and recommendations already provided.
+    """
+    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
+
+
+@tool
+def psychologist_transfer(
+    target: Literal["trainer", "physiotherapist", "recovery_coach", "dietitian"],
+    reason: str,
+) -> Command:
+    """
+    HANDOFF — transfer control from the Psychologist to another specialist.
+
+    CRITICAL: Call this as the LAST and ONLY tool in your response.
+    NEVER combine this with a domain tool (get_recent_workouts, get_daily_readiness,
+    search_coaching_books, etc.) in the same turn.
+    Complete all psychological assessment and intervention first, THEN call this tool alone.
+
+    target — choose exactly one string:
+      "trainer"          : mental skills addressed, athlete ready to resume training focus
+      "physiotherapist"  : psychological issue is linked to physical pain or injury fear
+      "recovery_coach"   : burnout or overtraining stress needs physical recovery management
+      "dietitian"        : eating concern (restriction, body image) requires nutritional support
+
+    reason — handoff note with psychological context and interventions already provided.
     """
     return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})

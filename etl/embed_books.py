@@ -116,6 +116,25 @@ BOOKS = [
         "path":       "data/model/physiology/Clinical Sports Medicine Khan & Khanum -  3rd Ed.pdf",
         "page_split": 2,
     },
+    # ── Psychology ────────────────────────────────────────────────────────────────
+    {
+        "key":      "champions_mind",
+        "title":    "The Champion's Mind: How Great Athletes Think, Train, and Thrive",
+        "category": "psychology",
+        "path":     "data/model/psychologist/the-champions-mind-how-great-athletes-think-train-and-thrive-978-1-62336-149-5-1623361494-978-1-62336-148-8.pdf",
+    },
+    {
+        "key":      "applied_sport_psych",
+        "title":    "Applied Sport Psychology",
+        "category": "psychology",
+        "path":     "data/model/psychologist/pdfcoffee.com_applied-sport-psychology-pdf-2-pdf-free.pdf",
+    },
+    {
+        "key":      "foundations_sport_psych",
+        "title":    "Foundations of Sport and Exercise Psychology",
+        "category": "psychology",
+        "path":     "data/model/psychologist/dokumen.pub_foundations-of-sport-and-exercise-psychology-with-web-study-guide-6th-edition-9781450469814-2014001380-1450469817.pdf",
+    },
 ]
 
 # Directories whose every PDF is ingested automatically.

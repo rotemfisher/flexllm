@@ -12,20 +12,23 @@ from src.agent.trainer import TRAINER_TOOLS
 from src.agent.physiotherapist import PHYSIO_TOOLS
 from src.agent.recovery_coach import RECOVERY_TOOLS
 from src.agent.dietitian import DIETITIAN_TOOLS
+from src.agent.psychologist import PSYCHOLOGIST_TOOLS
 from src.agent.prompts import (
     build_trainer_prompt,
     build_physio_prompt,
     build_recovery_prompt,
     build_dietitian_prompt,
+    build_psychologist_prompt,
 )
 from src.agent.router import route_entry
 
-# Names of the four handoff tools — used by the conflict resolver.
+# Names of the five handoff tools — used by the conflict resolver.
 _HANDOFF_TOOL_NAMES = frozenset({
     "trainer_transfer",
     "physio_transfer",
     "recovery_transfer",
     "dietitian_transfer",
+    "psychologist_transfer",
 })
 
 # Keep at most this many messages in the context window sent to the LLM.
@@ -43,7 +46,7 @@ def _trim_messages(messages: list[BaseMessage], max_messages: int = _MAX_HISTORY
     result (without its AIMessage parent that contains tool_calls) confuses
     the Ollama chat format and can cause an API error.
     """
-    # working with tools is always in pairs of AIMessage + ToolMessage, so max_messages should be even to avoid cutting off in the middle of a pair.  
+    # working with tools is always in pairs of AIMessage + ToolMessage, so max_messages should be even to avoid cutting off in the middle of a pair.
     if len(messages) <= max_messages:
         return messages
     trimmed = list(messages[-max_messages:])
@@ -100,26 +103,29 @@ def _should_continue(tools_node_name: str):
 
 @contextmanager
 def build_multi_agent_graph():
-    llm = ChatOllama(model=config.MODEL_ID, temperature=0)
+    llm = ChatOllama(model=config.MODEL_ID, temperature=0, base_url=config.OLLAMA_BASE_URL)
 
-    trainer_llm   = llm.bind_tools(TRAINER_TOOLS)
-    physio_llm    = llm.bind_tools(PHYSIO_TOOLS)
-    recovery_llm  = llm.bind_tools(RECOVERY_TOOLS)
-    dietitian_llm = llm.bind_tools(DIETITIAN_TOOLS)
+    trainer_llm      = llm.bind_tools(TRAINER_TOOLS)
+    physio_llm       = llm.bind_tools(PHYSIO_TOOLS)
+    recovery_llm     = llm.bind_tools(RECOVERY_TOOLS)
+    dietitian_llm    = llm.bind_tools(DIETITIAN_TOOLS)
+    psychologist_llm = llm.bind_tools(PSYCHOLOGIST_TOOLS)
 
     graph = StateGraph(CoachState)
 
     # Agent nodes
-    graph.add_node("trainer",         _make_agent_node(trainer_llm,   build_trainer_prompt))
-    graph.add_node("physiotherapist", _make_agent_node(physio_llm,    build_physio_prompt))
-    graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,  build_recovery_prompt))
-    graph.add_node("dietitian",       _make_agent_node(dietitian_llm, build_dietitian_prompt))
+    graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt))
+    graph.add_node("physiotherapist", _make_agent_node(physio_llm,       build_physio_prompt))
+    graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,     build_recovery_prompt))
+    graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt))
+    graph.add_node("psychologist",    _make_agent_node(psychologist_llm, build_psychologist_prompt))
 
     # Tool nodes — separate per agent so each only exposes its own tools
-    graph.add_node("trainer_tools",   ToolNode(TRAINER_TOOLS))
-    graph.add_node("physio_tools",    ToolNode(PHYSIO_TOOLS))
-    graph.add_node("recovery_tools",  ToolNode(RECOVERY_TOOLS))
-    graph.add_node("dietitian_tools", ToolNode(DIETITIAN_TOOLS))
+    graph.add_node("trainer_tools",      ToolNode(TRAINER_TOOLS))
+    graph.add_node("physio_tools",       ToolNode(PHYSIO_TOOLS))
+    graph.add_node("recovery_tools",     ToolNode(RECOVERY_TOOLS))
+    graph.add_node("dietitian_tools",    ToolNode(DIETITIAN_TOOLS))
+    graph.add_node("psychologist_tools", ToolNode(PSYCHOLOGIST_TOOLS))
 
     # Entry: semantic router at START (embedding cosine similarity)
     graph.add_conditional_edges(START, route_entry, {
@@ -127,6 +133,7 @@ def build_multi_agent_graph():
         "physiotherapist": "physiotherapist",
         "recovery_coach":  "recovery_coach",
         "dietitian":       "dietitian",
+        "psychologist":    "psychologist",
     })
 
     # Each agent routes to its tool node or END
@@ -146,13 +153,18 @@ def build_multi_agent_graph():
         "dietitian", _should_continue("dietitian_tools"),
         {"dietitian_tools": "dietitian_tools", END: END},
     )
+    graph.add_conditional_edges(
+        "psychologist", _should_continue("psychologist_tools"),
+        {"psychologist_tools": "psychologist_tools", END: END},
+    )
 
     # Normal tool calls loop back to their owning agent.
     # When a handoff tool returns Command(goto=...), LangGraph overrides these edges.
-    graph.add_edge("trainer_tools",   "trainer")
-    graph.add_edge("physio_tools",    "physiotherapist")
-    graph.add_edge("recovery_tools",  "recovery_coach")
-    graph.add_edge("dietitian_tools", "dietitian")
+    graph.add_edge("trainer_tools",      "trainer")
+    graph.add_edge("physio_tools",       "physiotherapist")
+    graph.add_edge("recovery_tools",     "recovery_coach")
+    graph.add_edge("dietitian_tools",    "dietitian")
+    graph.add_edge("psychologist_tools", "psychologist")
 
     # Yield the compiled graph with a SqliteSaver checkpointer. Using a context manager ensures the checkpointer connection is properly closed after use.
     with SqliteSaver.from_conn_string(config.DB_PATH) as checkpointer:

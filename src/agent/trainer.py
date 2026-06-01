@@ -15,10 +15,16 @@ from src.tools import (
     update_athlete_profile,
     search_coaching_books,
     query_running_database,
+    check_upcoming_race_or_test,
+    check_training_anomaly,
 )
 from src.agent.handoffs import trainer_transfer
 
 TRAINER_TOOLS = [
+    # Proactive detection — called first at session start
+    check_upcoming_race_or_test,
+    check_training_anomaly,
+    # Core training tools
     get_onboarding_status,
     log_fitness_assessment,
     get_fitness_assessments,
