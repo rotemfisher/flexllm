@@ -7,3 +7,5 @@ pydantic-settings
 qdrant-client
 fastembed
 langsmith
+pytest
+numpy
