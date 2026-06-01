@@ -7,5 +7,6 @@ pydantic-settings
 qdrant-client
 fastembed
 langsmith
+sentence-transformers
 pytest
 numpy
