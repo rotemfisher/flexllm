@@ -6,6 +6,7 @@ Run from the project root:
 """
 from langchain_core.messages import AIMessageChunk
 
+from src.tracing import setup_tracing
 from src.agent.coach_agent import build_coach_graph, get_athlete_context
 from src.agent.memory import SummaryStore, save_session_summary, maybe_refresh_weekly_summary
 from src.config import config
@@ -38,6 +39,7 @@ def _persist_session_summaries(graph, run_config: dict, initial_message_count: i
 
 
 def main() -> None:
+    setup_tracing()
     print("Loading FlexLLM Coach (first run loads the embedding model, ~5s)...")
     athlete_ctx = get_athlete_context()
     run_config = {"configurable": {"thread_id": THREAD_ID}}

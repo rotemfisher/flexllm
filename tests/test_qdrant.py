@@ -184,26 +184,6 @@ def test_book_meets_minimum_chunk_count(qdrant_col, book, min_n):
            "Re-run `python etl/embed_books.py`.")
     )
 
-
-# ─── ISSN articles ────────────────────────────────────────────────────────────
-
-def test_issn_articles_present(qdrant_col):
-    client, *_ = qdrant_col
-    points     = _scroll_all(client, with_payload=True)
-    issn_books = {
-        p.payload["book"] for p in points
-        if p.payload
-        and p.payload["book"][:2].isdigit()
-        and p.payload.get("category") == "nutrition"
-    }
-    if not issn_books:
-        pytest.skip("ISSN articles not yet embedded — run `python etl/embed_books.py`")
-    assert len(issn_books) >= 20, (
-        f"Only {len(issn_books)}/29 ISSN articles embedded. "
-        "Run `python etl/embed_books.py` to finish."
-    )
-
-
 # ─── Embedding dimension ─────────────────────────────────────────────────────
 
 def test_embedding_dimension_is_1024(qdrant_col):

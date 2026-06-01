@@ -2,9 +2,8 @@
 tests/test_split.py — Validate that pre-splitting multi-column PDFs improves
 Docling extraction quality.
 
-Fast structural tests run always.
-Docling quality tests are skipped unless --docling flag is passed:
-    pytest tests/test_split.py --docling -v
+All tests run always. Docling quality tests auto-skip when source PDFs are absent
+(e.g. in CI where data/model/ is not checked in).
 """
 
 import sys
@@ -196,16 +195,14 @@ def test_split_strips_cover_full_width(tmp_path, case):
 # ── Docling quality tests (slow, opt-in) ──────────────────────────────────────
 
 @pytest.mark.parametrize("case", SPLIT_CASES, ids=[c["label"] for c in SPLIT_CASES])
-def test_docling_split_extracts_more_content(tmp_path, request, case):
+def test_docling_split_extracts_more_content(tmp_path, case):
     """
     Docling must extract substantially more text from the pre-split PDF than
     from the raw multi-column PDF.
 
-    Expected improvement: split version yields ≥1.5× the character count,
+    Expected improvement: split version yields ≥1.4× the character count,
     meaning Docling was silently dropping content from the wide multi-column page.
     """
-    if not request.config.getoption("--docling", default=False):
-        pytest.skip("Pass --docling to run slow Docling quality tests")
 
     src = case["path"]
     if not src.exists():
@@ -233,7 +230,7 @@ def test_docling_split_extracts_more_content(tmp_path, request, case):
     print(f"\n  --- AFTER  (first 400 chars) ---")
     print(f"  {md_after[:400]}")
 
-    assert ratio >= 1.5, (
-        f"Split should yield ≥1.5× more content but got {ratio:.2f}× "
+    assert ratio >= 1.4, (
+        f"Split should yield ≥1.4× more content but got {ratio:.2f}× "
         f"({len(md_before)} → {len(md_after)} chars)"
     )

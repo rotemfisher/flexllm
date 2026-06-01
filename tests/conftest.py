@@ -16,17 +16,12 @@ from pathlib import Path
 
 import pytest
 
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--docling",
-        action="store_true",
-        default=False,
-        help="Run slow Docling quality tests (takes ~2 min per book).",
-    )
-
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+from src.tracing import setup_tracing
+setup_tracing()  # activate LangSmith tracing if LANGSMITH_API_KEY is set
+
 
 # ── prod_db ───────────────────────────────────────────────────────────────────
 
