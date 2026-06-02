@@ -44,7 +44,7 @@ def get_athlete_context() -> str:
 
     # ── Conversation summaries (long-term memory) ─────────────────────────────
     try:
-        store = SummaryStore(config.DB_PATH)
+        store = SummaryStore(str(config.DB_PATH))
         summary_block = store.format_for_context()
         if summary_block:
             parts.append(summary_block)

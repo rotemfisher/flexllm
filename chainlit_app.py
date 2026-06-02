@@ -19,7 +19,7 @@ import chainlit as cl
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.api.app import register_health_routes
+from src.api.app import register_health_routes, setup_logging
 from src.agent.coach_agent import build_coach_graph, get_athlete_context
 from src.config import config
 from src.tracing import setup_tracing
@@ -30,6 +30,7 @@ _AGENT_NODES = frozenset({"trainer", "physiotherapist", "recovery_coach", "dieti
 
 # ── One-time process startup ───────────────────────────────────────────────────
 
+setup_logging()
 setup_tracing()
 
 # One graph instance shared across all users. SqliteSaver connection is kept

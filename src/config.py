@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "local"  # local | dev | staging | prod
 
     # ── Data paths ────────────────────────────────────────────────────────────
-    DB_PATH: str = str(_PROJECT_ROOT / "data" / "personal" / "running.db")
-    QDRANT_PATH: str = str(_PROJECT_ROOT / "data" / "qdrant_db")
+    DB_PATH: Path = _PROJECT_ROOT / "data" / "personal" / "running.db"
+    QDRANT_PATH: Path = _PROJECT_ROOT / "data" / "qdrant_db"
     QDRANT_COLLECTION: str = "coaching_books"
 
     # ── Models ────────────────────────────────────────────────────────────────
@@ -26,10 +26,11 @@ class Settings(BaseSettings):
 
     # ── Auth (Chainlit password gate) ─────────────────────────────────────────
     # Set APP_PASSWORD in .env. Anyone with the Cloudflare URL must know it.
-    APP_PASSWORD: str = "change-me-in-env"
+    # No default — app refuses to start if these are missing from .env.
+    APP_PASSWORD: str
     # Must be a stable random secret — sessions invalidate if this changes.
     # Generate with: openssl rand -hex 32
-    CHAINLIT_AUTH_SECRET: str = "change-me-in-env"
+    CHAINLIT_AUTH_SECRET: str
 
     # ── Cloudflare Tunnel (optional) ──────────────────────────────────────────
     # Leave blank → ephemeral *.trycloudflare.com URL printed to logs.

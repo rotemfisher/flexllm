@@ -167,5 +167,5 @@ def build_multi_agent_graph():
     graph.add_edge("psychologist_tools", "psychologist")
 
     # Yield the compiled graph with a SqliteSaver checkpointer. Using a context manager ensures the checkpointer connection is properly closed after use.
-    with SqliteSaver.from_conn_string(config.DB_PATH) as checkpointer:
+    with SqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
         yield graph.compile(checkpointer=checkpointer)

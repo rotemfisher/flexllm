@@ -16,19 +16,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── Runtime image ─────────────────────────────────────────────────────────────
 FROM deps AS runtime
 
-COPY src/ ./src/
-COPY sql/ ./sql/
-COPY chainlit_app.py .
+# Create non-root user before COPY so --chown works without an extra layer
+RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Non-root user
-RUN groupadd -r appuser && useradd -r -g appuser appuser \
-    && chown -R appuser:appuser /app
+COPY --chown=appuser:appuser src/ ./src/
+COPY --chown=appuser:appuser sql/ ./sql/
+COPY --chown=appuser:appuser chainlit_app.py .
 
 USER appuser
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=10)"
+    CMD curl --fail http://localhost:8000/health || exit 1
 
 CMD ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "8000"]

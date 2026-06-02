@@ -33,7 +33,7 @@ def _persist_session_summaries(graph, run_config: dict, initial_message_count: i
             return
 
         active_agent = state.values.get("active_agent") or "trainer"
-        store = SummaryStore(config.DB_PATH)
+        store = SummaryStore(str(config.DB_PATH))
         save_session_summary(new_messages, active_agent, store, config.MODEL_ID)
         maybe_refresh_weekly_summary(store, config.MODEL_ID)
     except Exception:
