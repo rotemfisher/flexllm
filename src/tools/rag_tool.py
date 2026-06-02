@@ -37,7 +37,11 @@ def _get_models():
         with _lock:
             if _client is None:  # double-checked locking
                 try:
-                    client       = QdrantClient(path=config.QDRANT_PATH)
+                    client = (
+                        QdrantClient(url=config.QDRANT_URL)
+                        if config.QDRANT_URL
+                        else QdrantClient(path=config.QDRANT_PATH)
+                    )
                     dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
                     sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
                     rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")

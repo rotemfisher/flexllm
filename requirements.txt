@@ -14,3 +14,7 @@ numpy==2.4.6
 chainlit==2.11.0
 fastapi==0.136.3
 uvicorn[standard]==0.48.0
+# File watcher (Apple Health auto-ingest)
+watchdog==6.0.0
+# Evaluation
+ragas==0.2.15

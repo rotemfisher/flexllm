@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # ── Data paths ────────────────────────────────────────────────────────────
     DB_PATH: Path = _PROJECT_ROOT / "data" / "personal" / "running.db"
     QDRANT_PATH: Path = _PROJECT_ROOT / "data" / "qdrant_db"
+    # When running the dedicated qdrant container, set QDRANT_URL (e.g.
+    # http://qdrant:6333).  If set it takes precedence over QDRANT_PATH.
+    QDRANT_URL: str | None = None
     QDRANT_COLLECTION: str = "coaching_books"
 
     # ── Models ────────────────────────────────────────────────────────────────

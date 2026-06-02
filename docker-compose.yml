@@ -1,5 +1,28 @@
 services:
 
+  # ── Qdrant vector database ────────────────────────────────────────────────────
+  # Runs as its own service so it can be restarted independently of the app and
+  # so the storage is not locked by a single process.  The app connects via HTTP
+  # (QDRANT_URL=http://qdrant:6333) rather than the embedded file-path client.
+  #
+  # First-run: populate with  docker compose run --rm app python etl/embed_books.py
+  # (embed_books.py respects QDRANT_URL automatically via src/config.py)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: flexllm-qdrant
+    restart: unless-stopped
+    volumes:
+      # Reuse the same directory embed_books.py already populated locally.
+      - ./data/qdrant_db:/qdrant/storage:rw
+    networks:
+      - flexllm
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 20s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
   # ── Python Chainlit app — LangGraph coaching agent ───────────────────────────
   app:
     build:
@@ -10,12 +33,14 @@ services:
     environment:
       ENVIRONMENT: prod
       DB_PATH: /data/personal/running.db
-      QDRANT_PATH: /data/qdrant_db
+      # Use the Qdrant service instead of the embedded file client.
+      QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-coaching_books}
       MODEL_ID: ${MODEL_ID:-qwen2.5:32b}
       EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-large-en-v1.5}
-      # Ollama runs on the host machine (GPU access). host.docker.internal resolves
-      # to the host on Docker Desktop (Mac/Win). On Linux, extra_hosts maps it below.
+      # Ollama runs on the host machine (GPU/Metal access).
+      # host.docker.internal resolves to the host on Docker Desktop (Mac/Win).
+      # On Linux the extra_hosts entry below maps it via host-gateway.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       # Auth
       APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD must be set in .env}
@@ -26,23 +51,47 @@ services:
       # Chainlit data persistence — appends tables to the existing running.db
       CHAINLIT_DATABASE_URL: sqlite:////data/personal/running.db
     volumes:
-      # Athlete data, Qdrant store, and LangGraph checkpoints
       - ./data:/data:rw
-      # Embedding model cache to avoid re-downloading on every restart
       - model_cache:/root/.cache/huggingface
     ports:
       - "8000:8000"
     networks:
       - flexllm
-    # Allow the app to reach Ollama on the host (Linux only; Docker Desktop auto-resolves)
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      qdrant:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
       interval: 30s
       timeout: 15s
       start_period: 180s
       retries: 5
+
+  # ── Apple Health file watcher ─────────────────────────────────────────────────
+  # Watches data/personal/apple_health_export/ for a new or updated export.xml
+  # (or ייצוא.xml) and automatically runs the ETL pipeline.
+  # Drop your Apple Health export into data/personal/apple_health_export/ on the
+  # host and the DB will be updated within ~3 seconds.
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flexllm-watcher
+    restart: unless-stopped
+    command: python etl/watch_health.py
+    environment:
+      HEALTH_EXPORT_DIR: /data/personal/apple_health_export
+      DB_PATH: /data/personal/running.db
+      # Needed so ingest_health.py can import src/ without installing the package
+      PYTHONPATH: /app
+    volumes:
+      - ./data:/data:rw
+    networks:
+      - flexllm
+    depends_on:
+      - app
 
   # ── Cloudflare Tunnel sidecar ─────────────────────────────────────────────────
   # Ephemeral mode (default): prints a random *.trycloudflare.com URL to logs.
@@ -51,11 +100,9 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: flexllm-cloudflared
     restart: unless-stopped
-    # Share the app container's network so cloudflared can reach localhost:8000
     network_mode: service:app
     environment:
       CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
-    # Shell wrapper: use token (persistent domain) when set, else ephemeral URL
     entrypoint: /bin/sh
     command: >
       -c 'if [ -n "$$CLOUDFLARE_TUNNEL_TOKEN" ];
