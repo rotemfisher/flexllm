@@ -36,6 +36,7 @@ from src.tools.readiness_tool import get_daily_readiness
 from src.tools.sql_tool import query_running_database
 from src.tools.strength_tool import get_recent_strength_sets, log_strength_sets
 from src.tools.vdot_tool import get_vdot_paces
+from src.tools.nutrition_tool import get_nutrition_profile
 from src.tools.workout_history_tool import get_recent_workouts
 
 
@@ -843,3 +844,215 @@ class TestUpdateAthleteProfile:
     def test_no_profile_returns_message(self, empty_db):
         result = update_athlete_profile.invoke({"field": "current_goal", "value": "marathon_prep"})
         assert "No athlete profile found" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Data Freshness
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDataFreshness:
+    """
+    get_daily_readiness must prepend a sync warning when the most recent
+    daily_health row is older than _STALE_DAYS, and must stay silent when
+    the data is current.
+    """
+
+    def test_stale_data_prepends_sync_warning(self, tools_db):
+        # The fixture seeds daily_health with date='2026-01-10', which is well
+        # over 7 days in the past relative to today (2026-06-02+).
+        result = get_daily_readiness.invoke({"date": "2026-01-10"})
+        assert "STALE" in result
+        assert "sync" in result.lower() or "Sync" in result
+
+    def test_stale_warning_mentions_health_app(self, tools_db):
+        result = get_daily_readiness.invoke({"date": "2026-01-10"})
+        assert "Health" in result
+
+    def test_fresh_data_has_no_stale_warning(self, tools_db):
+        today = _today()
+        con = sqlite3.connect(str(tools_db))
+        con.execute(
+            "INSERT OR REPLACE INTO daily_health (date, atl, ctl, tsb)"
+            " VALUES (?, 40.0, 50.0, 10.0)",
+            (today,),
+        )
+        con.commit()
+        con.close()
+        result = get_daily_readiness.invoke({"date": today})
+        assert "STALE" not in result
+
+    def test_readiness_content_still_present_even_when_stale(self, tools_db):
+        """Stale warning must prepend, not replace, the readiness data."""
+        result = get_daily_readiness.invoke({"date": "2026-01-10"})
+        assert "Readiness Report" in result
+        assert "CTL" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Agent-Write Validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSaveWorkoutPlanValidation:
+    """
+    save_workout_plan must reject unknown activity_type / workout_type values
+    before they reach the database.  These are the most common LLM hallucinations.
+    """
+
+    def test_unknown_activity_type_rejected(self, tools_db):
+        bad = [dict(_BASE_SESSION, activity_type="yoga")]
+        result = save_workout_plan.invoke({"week_start": "2026-06-01", "sessions": json.dumps(bad)})
+        assert "Error" in result and "activity_type" in result
+
+    def test_swimming_activity_type_rejected_for_planner(self, tools_db):
+        # 'swimming' is valid in the workouts table but not in planned_workouts
+        bad = [dict(_BASE_SESSION, activity_type="swimming")]
+        result = save_workout_plan.invoke({"week_start": "2026-06-01", "sessions": json.dumps(bad)})
+        assert "Error" in result and "activity_type" in result
+
+    def test_unknown_workout_type_rejected(self, tools_db):
+        bad = [dict(_BASE_SESSION, workout_type="fartlek")]
+        result = save_workout_plan.invoke({"week_start": "2026-06-01", "sessions": json.dumps(bad)})
+        assert "Error" in result and "workout_type" in result
+
+    def test_valid_activity_and_type_accepted(self, tools_db):
+        good = [dict(_BASE_SESSION)]
+        result = save_workout_plan.invoke({"week_start": "2026-06-01", "sessions": json.dumps(good)})
+        assert "Saved" in result
+
+    def test_replace_day_rejects_unknown_activity_type(self, tools_db):
+        bad = [{
+            "activity_type": "yoga",
+            "workout_type": "easy",
+            "description": "yoga session",
+            "intensity": "easy",
+        }]
+        result = replace_day_in_plan.invoke({
+            "week_start": "2026-06-01",
+            "day_date": "2026-06-02",
+            "sessions": json.dumps(bad),
+        })
+        assert "Error" in result and "activity_type" in result
+
+
+class TestLogStrengthSetsValidation:
+    """
+    log_strength_sets must reject physiologically impossible values before
+    writing them.  These protect against LLM-hallucinated weights / rep counts.
+    """
+
+    def test_weight_above_500kg_rejected(self, tools_db):
+        heavy = json.dumps([{"exercise_name": "squat", "set_number": 1,
+                             "weight_kg": 1000.0, "reps": 3}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": heavy})
+        assert "Error" in result and "weight_kg" in result
+
+    def test_negative_weight_rejected(self, tools_db):
+        neg = json.dumps([{"exercise_name": "deadlift", "set_number": 1,
+                           "weight_kg": -20.0, "reps": 5}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": neg})
+        assert "Error" in result and "weight_kg" in result
+
+    def test_reps_above_100_rejected(self, tools_db):
+        many = json.dumps([{"exercise_name": "squat", "set_number": 1,
+                            "weight_kg": 80.0, "reps": 500}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": many})
+        assert "Error" in result and "reps" in result
+
+    def test_zero_reps_rejected(self, tools_db):
+        zero = json.dumps([{"exercise_name": "squat", "set_number": 1,
+                            "weight_kg": 80.0, "reps": 0}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": zero})
+        assert "Error" in result and "reps" in result
+
+    def test_set_number_above_50_rejected(self, tools_db):
+        bad_set = json.dumps([{"exercise_name": "plank", "set_number": 99,
+                               "duration_sec": 60.0}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": bad_set})
+        assert "Error" in result and "set_number" in result
+
+    def test_borderline_valid_weight_accepted(self, tools_db):
+        edge = json.dumps([{"exercise_name": "squat", "set_number": 1,
+                            "weight_kg": 500.0, "reps": 1}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": edge})
+        assert "Logged" in result
+
+    def test_bodyweight_set_no_weight_accepted(self, tools_db):
+        bw = json.dumps([{"exercise_name": "pull_up", "set_number": 1, "reps": 10}])
+        result = log_strength_sets.invoke({"workout_id": 2, "sets_json": bw})
+        assert "Logged" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tool Output Formatting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Strings that must never appear in any tool output — they degrade LLM reasoning.
+_FORBIDDEN_STRINGS = ("None", "NaN", "null", "Traceback", "TypeError",
+                      "AttributeError", "KeyError", "IndexError")
+
+
+class TestToolOutputFormatting:
+    """
+    Tools must never leak Python None values, NaN, or raw exception tracebacks
+    into their string output.  An LLM reading 'Resting HR: None bpm' draws wrong
+    conclusions; an exception traceback is even worse.
+    """
+
+    def _assert_clean(self, result: str, tool_name: str) -> None:
+        for bad in _FORBIDDEN_STRINGS:
+            assert bad not in result, (
+                f"{tool_name} returned the forbidden string '{bad}'.\n"
+                f"Full output: {result[:300]}"
+            )
+
+    # ── Empty / no-data paths ─────────────────────────────────────────────────
+
+    def test_readiness_empty_db_is_clean(self, empty_db):
+        self._assert_clean(get_daily_readiness.invoke({"date": "2025-01-01"}), "get_daily_readiness")
+
+    def test_recent_workouts_empty_db_is_clean(self, empty_db):
+        self._assert_clean(
+            get_recent_workouts.invoke({"limit": 5, "activity_type": "running"}),
+            "get_recent_workouts",
+        )
+
+    def test_nutrition_profile_empty_db_is_clean(self, empty_db):
+        self._assert_clean(get_nutrition_profile.invoke({}), "get_nutrition_profile")
+
+    def test_current_workout_plan_empty_db_is_clean(self, empty_db):
+        self._assert_clean(get_current_workout_plan.invoke({}), "get_current_workout_plan")
+
+    def test_strength_sets_empty_db_is_clean(self, empty_db):
+        self._assert_clean(
+            get_recent_strength_sets.invoke({"exercise_name": "squat"}),
+            "get_recent_strength_sets",
+        )
+
+    # ── Sparse rows (only mandatory columns populated) ────────────────────────
+
+    def test_readiness_sparse_row_is_clean(self, tools_db):
+        """A daily_health row with only ATL/CTL/TSB set must render cleanly."""
+        con = sqlite3.connect(str(tools_db))
+        con.execute(
+            "INSERT OR REPLACE INTO daily_health (date, atl, ctl, tsb)"
+            " VALUES ('2026-03-15', 40.0, 50.0, 10.0)"
+        )
+        con.commit()
+        con.close()
+        result = get_daily_readiness.invoke({"date": "2026-03-15"})
+        self._assert_clean(result, "get_daily_readiness (sparse row)")
+        # N/A is the correct placeholder — confirm the tool didn't blank them out
+        assert "N/A" in result
+
+    def test_recent_workouts_null_fields_is_clean(self, tools_db):
+        """A workout with null distance/HR/RPE must not produce 'None' in output."""
+        con = sqlite3.connect(str(tools_db))
+        con.execute(
+            """INSERT INTO workouts
+                   (id, activity_type, start_date, end_date, duration_min)
+               VALUES (99, 'running', '2026-01-20 08:00:00', '2026-01-20 09:00:00', 55.0)"""
+        )
+        con.commit()
+        con.close()
+        result = get_recent_workouts.invoke({"limit": 10, "activity_type": "running"})
+        self._assert_clean(result, "get_recent_workouts (sparse workout)")

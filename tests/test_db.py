@@ -8,6 +8,7 @@ Run fast subset only:
     pytest tests/test_db.py -v
 """
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,130 @@ def test_vdot_exact_count_and_spot_check(prod_db):
     assert actual == VDOT_50, (
         f"VDOT=50 mismatch.\n  expected: {VDOT_50}\n  got:      {actual}"
     )
+
+
+# ─── Data freshness ───────────────────────────────────────────────────────────
+
+def test_daily_health_data_is_recent(prod_db):
+    """
+    The most recent daily_health row must not be older than 14 days.
+    If this fails, sync the Apple Watch and re-run etl/ingest_health.py.
+    """
+    latest = prod_db.execute("SELECT MAX(date) FROM daily_health").fetchone()[0]
+    assert latest is not None, "daily_health table is empty"
+    age_days = (date.today() - date.fromisoformat(latest)).days
+    assert age_days <= 14, (
+        f"daily_health is {age_days} day(s) stale (latest row: {latest}). "
+        "Open the Health app, sync your Apple Watch, then re-run etl/ingest_health.py."
+    )
+
+
+def test_workouts_data_is_recent(prod_db):
+    """
+    The most recent workout must not be older than 21 days (allows for rest weeks).
+    If this fails, sync the Apple Watch and re-run etl/ingest_health.py.
+    """
+    latest = prod_db.execute(
+        "SELECT MAX(date(start_date)) FROM workouts"
+    ).fetchone()[0]
+    assert latest is not None, "workouts table is empty"
+    age_days = (date.today() - date.fromisoformat(latest)).days
+    assert age_days <= 21, (
+        f"workouts data is {age_days} day(s) stale (latest workout: {latest}). "
+        "Sync your Apple Watch and re-run etl/ingest_health.py."
+    )
+
+
+# ─── Logical coherence ────────────────────────────────────────────────────────
+
+def test_no_workouts_with_distance_but_zero_duration(prod_db):
+    """
+    A workout with distance_km > 0 and duration_min = 0 would produce infinite
+    pace (divide-by-zero) in any pace calculation.
+    """
+    bad = prod_db.execute(
+        "SELECT COUNT(*) FROM workouts "
+        "WHERE distance_km > 0 AND (duration_min IS NULL OR duration_min = 0)"
+    ).fetchone()[0]
+    assert bad == 0, (
+        f"{bad} workouts have distance_km > 0 but zero/null duration_min — "
+        "pace calculations would divide by zero."
+    )
+
+
+def test_sleep_stages_sum_within_tolerance_of_total(prod_db):
+    """
+    For rows that have sleep_total_min AND at least one stage column, the sum
+    of the four stage columns must be within 30 minutes of sleep_total_min.
+    A larger discrepancy means the ETL aggregated stages and total from different
+    sources and the LLM would receive contradictory sleep data.
+    """
+    bad = prod_db.execute(
+        """
+        SELECT COUNT(*) FROM daily_health
+        WHERE sleep_total_min IS NOT NULL AND sleep_total_min > 0
+          AND (sleep_deep_min IS NOT NULL OR sleep_rem_min IS NOT NULL
+               OR sleep_core_min IS NOT NULL OR sleep_awake_min IS NOT NULL)
+          AND ABS(
+                COALESCE(sleep_deep_min, 0) + COALESCE(sleep_rem_min, 0) +
+                COALESCE(sleep_core_min, 0) + COALESCE(sleep_awake_min, 0)
+                - sleep_total_min
+              ) > 30
+        """
+    ).fetchone()[0]
+    assert bad == 0, (
+        f"{bad} daily_health rows have sleep stage sums that diverge from "
+        "sleep_total_min by more than 30 minutes."
+    )
+
+
+def test_long_workouts_have_positive_calories(prod_db):
+    """
+    Any workout with duration_min > 30 that has a non-null active_calories value
+    must have calories > 0. A zero-calorie long effort signals an ETL parsing error.
+    """
+    bad = prod_db.execute(
+        "SELECT COUNT(*) FROM workouts "
+        "WHERE duration_min > 30 AND active_calories IS NOT NULL AND active_calories = 0"
+    ).fetchone()[0]
+    assert bad == 0, (
+        f"{bad} workouts lasting >30 min have active_calories = 0 (ETL parsing error)."
+    )
+
+
+# ─── Agent-written data integrity ─────────────────────────────────────────────
+
+def test_planned_workouts_use_known_activity_types(prod_db):
+    """
+    The LLM may only plan sessions with activity_type values that the planner
+    explicitly supports.  Any other value signals a hallucinated type.
+    """
+    allowed = {"running", "strength", "rest", "cross_training"}
+    found = {
+        row[0]
+        for row in prod_db.execute("SELECT DISTINCT activity_type FROM planned_workouts")
+    }
+    unknown = found - allowed
+    assert not unknown, (
+        f"planned_workouts contains unexpected activity_type values: {unknown}. "
+        "These were likely hallucinated by the LLM — check and clean up."
+    )
+
+
+def test_strength_sets_have_sane_weights(prod_db):
+    """No strength_set should have weight_kg > 500 kg (world-record headroom)."""
+    bad = prod_db.execute(
+        "SELECT COUNT(*) FROM strength_sets WHERE weight_kg IS NOT NULL AND weight_kg > 500"
+    ).fetchone()[0]
+    assert bad == 0, f"{bad} strength_sets have weight_kg > 500 kg (likely hallucinated)."
+
+
+def test_strength_sets_have_sane_reps(prod_db):
+    """No strength_set should have reps > 100 (physiologically implausible for weighted work)."""
+    bad = prod_db.execute(
+        "SELECT COUNT(*) FROM strength_sets WHERE reps IS NOT NULL AND reps > 100"
+    ).fetchone()[0]
+    assert bad == 0, f"{bad} strength_sets have reps > 100 (likely hallucinated)."
 
 
 # ─── Sleep aggregate consistency ─────────────────────────────────────────────

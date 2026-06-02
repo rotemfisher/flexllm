@@ -1,11 +1,31 @@
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from langchain_core.tools import tool
 
 from src.tools._utils import db_ro
 
 logger = logging.getLogger(__name__)
+
+# If the latest daily_health row is older than this many days, the agent must
+# ask the user to sync their Apple Watch before giving any readiness advice.
+_STALE_DAYS = 7
+
+
+def _stale_warning(data_date: str) -> str:
+    """Return a non-empty warning string if data_date is older than _STALE_DAYS."""
+    try:
+        age = (datetime.now(timezone.utc).date() - date.fromisoformat(data_date)).days
+    except (ValueError, TypeError):
+        return ""
+    if age <= _STALE_DAYS:
+        return ""
+    return (
+        f"⚠️  DATA IS STALE — The most recent health record is {age} day(s) old "
+        f"(last sync: {data_date}). Please ask the user to open the Health app on their iPhone, "
+        f"ensure their Apple Watch has synced, then re-export and re-ingest their data before "
+        f"giving readiness or training-load advice based on these numbers.\n\n"
+    )
 
 
 @tool
@@ -37,6 +57,8 @@ def get_daily_readiness(date: str | None = None) -> str:
         if not health:
             return f"No health or readiness data found on or before {date}."
 
+        warning = _stale_warning(health["date"])
+
         sleep_total = health["sleep_total_min"] or 0
         sleep_hours = sleep_total // 60
         sleep_mins  = sleep_total % 60
@@ -47,7 +69,7 @@ def get_daily_readiness(date: str | None = None) -> str:
 
         form_status = "Fresh" if tsb > 0 else "Fatigued" if tsb < -10 else "Optimal/Neutral"
 
-        return (
+        return warning + (
             f"--- Readiness Report for {health['date']} ---\n"
             f"Training Load (Fitness & Fatigue):\n"
             f"  - CTL (Fitness): {ctl:.1f}\n"

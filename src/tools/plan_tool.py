@@ -8,6 +8,14 @@ from src.tools._utils import db_ro, db_rw
 
 logger = logging.getLogger(__name__)
 
+# Allowed values for planned_workouts — deliberately narrower than the workouts
+# table because the planner only schedules these four types.
+_PLAN_ACTIVITY_TYPES = {"running", "strength", "rest", "cross_training"}
+_PLAN_WORKOUT_TYPES  = {
+    "easy", "tempo", "interval", "long_run", "recovery",
+    "strength", "rest", "assessment",
+}
+
 
 @tool
 def save_workout_plan(week_start: str, sessions: str) -> str:
@@ -50,6 +58,18 @@ def save_workout_plan(week_start: str, sessions: str) -> str:
         missing = required - s.keys()
         if missing:
             return f"Error: session {i} is missing required fields: {sorted(missing)}"
+
+        if s["activity_type"] not in _PLAN_ACTIVITY_TYPES:
+            return (
+                f"Error: session {i} has unknown activity_type '{s['activity_type']}'. "
+                f"Must be one of: {sorted(_PLAN_ACTIVITY_TYPES)}"
+            )
+
+        if s["workout_type"] not in _PLAN_WORKOUT_TYPES:
+            return (
+                f"Error: session {i} has unknown workout_type '{s['workout_type']}'. "
+                f"Must be one of: {sorted(_PLAN_WORKOUT_TYPES)}"
+            )
 
     try:
         with db_rw() as con:
@@ -178,6 +198,18 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: str) -> str:
         missing = required - s.keys()
         if missing:
             return f"Error: session {i} is missing required fields: {sorted(missing)}"
+
+        if s["activity_type"] not in _PLAN_ACTIVITY_TYPES:
+            return (
+                f"Error: session {i} has unknown activity_type '{s['activity_type']}'. "
+                f"Must be one of: {sorted(_PLAN_ACTIVITY_TYPES)}"
+            )
+
+        if s["workout_type"] not in _PLAN_WORKOUT_TYPES:
+            return (
+                f"Error: session {i} has unknown workout_type '{s['workout_type']}'. "
+                f"Must be one of: {sorted(_PLAN_WORKOUT_TYPES)}"
+            )
 
     try:
         with db_rw() as con:

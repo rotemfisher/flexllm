@@ -7,6 +7,12 @@ from src.tools._utils import db_ro, db_rw, epley_1rm
 
 logger = logging.getLogger(__name__)
 
+# Sanity bounds for LLM-generated strength data.
+# World-record raw squat is ~335 kg; 500 gives generous headroom for assisted/machine work.
+_MAX_WEIGHT_KG = 500.0
+_MAX_REPS      = 100   # >100 reps per set is physiologically implausible for weighted lifts
+_MAX_SET_NUM   = 50    # >50 sets of one exercise in a session is an error
+
 
 @tool
 def log_strength_sets(workout_id: int, sets_json: str) -> str:
@@ -36,6 +42,24 @@ def log_strength_sets(workout_id: int, sets_json: str) -> str:
     for i, s in enumerate(sets):
         if "exercise_name" not in s or "set_number" not in s:
             return f"Error: set {i} missing 'exercise_name' or 'set_number'."
+
+        set_num = s["set_number"]
+        if not (1 <= set_num <= _MAX_SET_NUM):
+            return f"Error: set {i} has set_number={set_num} outside valid range [1, {_MAX_SET_NUM}]."
+
+        weight = s.get("weight_kg")
+        if weight is not None and not (0 < weight <= _MAX_WEIGHT_KG):
+            return (
+                f"Error: set {i} has weight_kg={weight} outside valid range "
+                f"(0, {_MAX_WEIGHT_KG}]. Check the value and retry."
+            )
+
+        reps = s.get("reps")
+        if reps is not None and not (1 <= reps <= _MAX_REPS):
+            return (
+                f"Error: set {i} has reps={reps} outside valid range [1, {_MAX_REPS}]. "
+                f"Check the value and retry."
+            )
 
     try:
         with db_rw() as con:
