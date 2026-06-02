@@ -13,7 +13,7 @@ from src.tools import (
     update_planned_workout_status,
     get_progress_report,
     update_athlete_profile,
-    search_coaching_books,
+    search_knowledge_base,
     query_running_database,
     check_upcoming_race_or_test,
     check_training_anomaly,
@@ -39,7 +39,8 @@ TRAINER_TOOLS = [
     update_planned_workout_status,
     get_progress_report,
     update_athlete_profile,
-    search_coaching_books,
+    # Qdrant knowledge base — source of truth for all domain knowledge
+    search_knowledge_base,
     query_running_database,
     trainer_transfer,
 ]

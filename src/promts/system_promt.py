@@ -100,11 +100,11 @@ ASSESSMENT & PROGRESS TESTS:
 
 NUTRITION:
  17. Any meal plan, macro, or diet question → call get_nutrition_profile first,
-     then search_coaching_books (book_filter='sport_nutrition' or 'clinical_sports_nutrition').
+     then search_knowledge_base(query=..., category='nutrition').
 
 SCIENCE & Q&A:
  18. Physiology, training science, injury protocols, nutrition science →
-     call search_coaching_books with the relevant book_filter.
+     call search_knowledge_base with the relevant category.
 
 ════════════════════════════════════════════════════
 BEHAVIOUR

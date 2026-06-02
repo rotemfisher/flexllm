@@ -70,9 +70,26 @@ def qdrant_col():
         pytest.skip(f"required package not installed: {e}")
 
     try:
+        # rag_tool caches a module-level QdrantClient that holds the file lock.
+        # Release it before the fixture opens its own connection so tests can
+        # run alongside a partially-initialised app in the same process.
+        import src.tools.rag_tool as _rt
+        if _rt._client is not None:
+            try:
+                _rt._client.close()
+            except Exception:
+                pass
+            _rt._client = None
+    except Exception:
+        pass
+
+    try:
         client = QdrantClient(path=str(qdrant_path))
     except RuntimeError as e:
-        pytest.skip(f"Qdrant DB locked by another process — close other clients and retry: {e}")
+        pytest.skip(
+            f"Qdrant DB locked by an external process (is the Chainlit app running?). "
+            f"Stop it and retry.\nDetail: {e}"
+        )
 
     try:
         collections  = {c.name for c in client.get_collections().collections}
@@ -80,7 +97,10 @@ def qdrant_col():
             client.close()
             pytest.skip("coaching_books collection not found — run `python etl/embed_books.py` first")
 
-        dense_model  = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu")
+        # local_files_only avoids a HuggingFace Hub network check for the PEFT
+        # adapter config — model is always cached locally after the first run.
+        dense_model  = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu",
+                                           local_files_only=True)
         sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
         yield client, dense_model, sparse_model, "coaching_books"
     finally:

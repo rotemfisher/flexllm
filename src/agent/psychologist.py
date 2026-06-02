@@ -2,7 +2,7 @@ from src.tools import (
     get_recent_workouts,
     get_daily_readiness,
     update_athlete_profile,
-    search_coaching_books,
+    search_knowledge_base,
     query_running_database,
     get_situational_psych_tips,
     search_psychology_books,
@@ -15,7 +15,8 @@ PSYCHOLOGIST_TOOLS = [
     get_recent_workouts,
     get_daily_readiness,
     update_athlete_profile,
-    search_coaching_books,
+    # Qdrant knowledge base — source of truth for all domain knowledge
+    search_knowledge_base,
     query_running_database,
     psychologist_transfer,
 ]

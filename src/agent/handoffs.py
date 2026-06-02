@@ -111,7 +111,7 @@ def psychologist_transfer(
 
     CRITICAL: Call this as the LAST and ONLY tool in your response.
     NEVER combine this with a domain tool (get_recent_workouts, get_daily_readiness,
-    search_coaching_books, etc.) in the same turn.
+    search_knowledge_base, etc.) in the same turn.
     Complete all psychological assessment and intervention first, THEN call this tool alone.
 
     target — choose exactly one string:

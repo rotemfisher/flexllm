@@ -24,24 +24,19 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
-    # ── WhatsApp bridge ───────────────────────────────────────────────────────
-    WHATSAPP_BRIDGE_URL: str = "http://localhost:3001"
-    # Shared secret between the Node.js bridge and this API. Must be set in .env.
-    WEBHOOK_SECRET: str = "change-me-in-production"
-    # Comma-separated E.164 numbers allowed to use the bot, e.g. "+1234567890,+0987654321".
-    # Leave empty to allow any number that can reach the bot.
-    ALLOWED_NUMBERS: str = ""
-    # Minutes of inactivity before a conversation session summary is generated.
-    SESSION_TIMEOUT_MINUTES: int = 60
+    # ── Auth (Chainlit password gate) ─────────────────────────────────────────
+    # Set APP_PASSWORD in .env. Anyone with the Cloudflare URL must know it.
+    APP_PASSWORD: str = "change-me-in-env"
+    # Must be a stable random secret — sessions invalidate if this changes.
+    # Generate with: openssl rand -hex 32
+    CHAINLIT_AUTH_SECRET: str = "change-me-in-env"
+
+    # ── Cloudflare Tunnel (optional) ──────────────────────────────────────────
+    # Leave blank → ephemeral *.trycloudflare.com URL printed to logs.
+    # Set a token (from Cloudflare dashboard) → persistent custom domain.
+    CLOUDFLARE_TUNNEL_TOKEN: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    @property
-    def allowed_numbers_set(self) -> set[str]:
-        """Normalized phone numbers (digits only, no + prefix) from ALLOWED_NUMBERS."""
-        if not self.ALLOWED_NUMBERS.strip():
-            return set()
-        return {n.strip().lstrip("+") for n in self.ALLOWED_NUMBERS.split(",") if n.strip()}
 
 
 config = Settings()

@@ -153,7 +153,7 @@ RESOLVED INJURY:
 - Call resolve_injury once athlete is fully cleared.
 
 REFERENCE MATERIAL:
-- search_coaching_books(book_filter='physiology') or 'daniels' for return-to-run protocols.
+- search_knowledge_base(query=..., category='physiology') for return-to-run protocols.
 
 HANDOFF TRIGGERS:
 - New injury logged (log_injury called) → physio_transfer(target="psychologist") IMMEDIATELY after step 3 above.
@@ -198,7 +198,7 @@ TOOL RULES
 - Session modification: replace_day_in_plan or update_planned_workout_status.
 - Trend assessment: get_progress_report for 8-week load/recovery trend.
 - Always state the actual TSB, HRV, and sleep numbers in your response — not just "low" or "good".
-- Science reference: search_coaching_books(book_filter='physiology') for HRV or periodisation content.
+- Science reference: search_knowledge_base(query=..., category='physiology') for HRV or periodisation content.
 
 HANDOFF TRIGGERS:
 - Pain or injury suspected as driver of poor recovery → recovery_transfer(target="physiotherapist").
@@ -247,7 +247,7 @@ TOOL RULES
 ════════════════════════════════════════════════════
 - Always fetch nutrition profile before giving any numeric recommendations.
 - Use get_recent_workouts to understand recent caloric expenditure trend.
-- Evidence base: search_coaching_books(book_filter='sport_nutrition') or 'clinical_sports_nutrition'.
+- Evidence base: search_knowledge_base(query=..., category='nutrition').
 - Update dietary preferences or target weight: update_athlete_profile.
 - Custom caloric queries: query_running_database (e.g. avg active calories by week).
 
@@ -303,7 +303,7 @@ SITUATIONAL TIPS:
 FREE Q&A / EVIDENCE BASE:
 - For any psychology question, call search_psychology_books(query) — this searches
   the psychology book corpus (Champion's Mind, Applied Sport Psychology, Foundations).
-- For cross-domain evidence (physiology, nutrition intersection): search_coaching_books.
+- For cross-domain evidence (physiology, nutrition intersection): search_knowledge_base(query=...).
 
 TRAINING & READINESS CONTEXT:
 - get_recent_workouts — identify adherence patterns, performance anomalies, workload trends.

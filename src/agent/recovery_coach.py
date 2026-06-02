@@ -5,7 +5,7 @@ from src.tools import (
     replace_day_in_plan,
     update_planned_workout_status,
     get_progress_report,
-    search_coaching_books,
+    search_knowledge_base,
     check_upcoming_race_or_test,
     check_training_anomaly,
 )
@@ -20,6 +20,7 @@ RECOVERY_TOOLS = [
     replace_day_in_plan,
     update_planned_workout_status,
     get_progress_report,
-    search_coaching_books,
+    # Qdrant knowledge base — source of truth for all domain knowledge
+    search_knowledge_base,
     recovery_transfer,
 ]

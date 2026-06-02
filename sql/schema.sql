@@ -17,17 +17,20 @@ PRAGMA synchronous    = NORMAL;
 
 CREATE TABLE IF NOT EXISTS athlete_profile (
     id                   INTEGER PRIMARY KEY,
+    name                 TEXT,                   -- collected during web onboarding
     date_of_birth        TEXT NOT NULL,          -- "YYYY-MM-DD"
     biological_sex       TEXT,                   -- 'male' | 'female' | 'other'
     blood_type           TEXT,                   -- e.g. 'B-'
     height_cm            REAL,                   -- BMR calculation
+    current_weight_kg    REAL,                   -- captured at onboarding; agents update via profile tool
     current_goal         TEXT,                   -- 'fat_loss' | 'muscle_gain' | 'marathon_prep' | '10k_prep' | 'maintenance' | ...
     secondary_goal       TEXT,                   -- optional second goal (e.g. 'muscle_gain' while training for 10k)
     target_weight_kg     REAL,
     dietary_pref         TEXT,                   -- 'vegan' | 'omnivore' | 'gluten-free' | ...
     fitness_level        TEXT DEFAULT 'intermediate'
                          CHECK (fitness_level IN ('beginner', 'intermediate', 'advanced')),
-    onboarding_complete  INTEGER DEFAULT 0,      -- 0 = needs physical assessment, 1 = baseline established
+    medical_conditions   TEXT,                   -- free-text: injuries, contraindications, etc.
+    onboarding_complete  INTEGER DEFAULT 0,      -- 0 = onboarding pending, 1 = complete
     updated_at           TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
 );
 

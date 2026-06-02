@@ -18,6 +18,7 @@ FROM deps AS runtime
 
 COPY src/ ./src/
 COPY sql/ ./sql/
+COPY chainlit_app.py .
 
 # Non-root user
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
@@ -30,8 +31,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=10)"
 
-CMD ["python", "-m", "uvicorn", "src.api.app:app", \
-     "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", \
-     "--log-level", "warning", \
-     "--access-log"]
+CMD ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "8000"]

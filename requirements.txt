@@ -10,7 +10,7 @@ langsmith
 sentence-transformers
 pytest
 numpy
-# WhatsApp / HTTP API
+# Web UI + API
+chainlit
 fastapi
 uvicorn[standard]
-httpx

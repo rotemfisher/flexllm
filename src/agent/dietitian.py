@@ -3,7 +3,7 @@ from src.tools import (
     get_daily_readiness,
     get_recent_workouts,
     update_athlete_profile,
-    search_coaching_books,
+    search_knowledge_base,
     query_running_database,
 )
 from src.agent.handoffs import dietitian_transfer
@@ -13,7 +13,8 @@ DIETITIAN_TOOLS = [
     get_daily_readiness,
     get_recent_workouts,
     update_athlete_profile,
-    search_coaching_books,
+    # Qdrant knowledge base — source of truth for all domain knowledge
+    search_knowledge_base,
     query_running_database,
     dietitian_transfer,
 ]

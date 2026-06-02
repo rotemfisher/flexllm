@@ -8,7 +8,7 @@ from src.tools import (
     save_workout_plan,
     replace_day_in_plan,
     update_planned_workout_status,
-    search_coaching_books,
+    search_knowledge_base,
 )
 from src.agent.handoffs import physio_transfer
 
@@ -22,6 +22,7 @@ PHYSIO_TOOLS = [
     save_workout_plan,
     replace_day_in_plan,
     update_planned_workout_status,
-    search_coaching_books,
+    # Qdrant knowledge base — source of truth for all domain knowledge
+    search_knowledge_base,
     physio_transfer,
 ]

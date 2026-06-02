@@ -1,4 +1,4 @@
-from .rag_tool import search_coaching_books
+from .knowledge_base_tool import search_knowledge_base
 from .psych_tool import get_situational_psych_tips, search_psychology_books
 from .sport_radar_tool import check_upcoming_race_or_test, check_training_anomaly
 from .sql_tool import query_running_database
@@ -16,8 +16,9 @@ from .assessment_tool import get_onboarding_status, log_fitness_assessment, get_
 from .profile_tool import update_athlete_profile
 
 __all__ = [
-    # RAG & SQL
-    "search_coaching_books",
+    # Qdrant knowledge base (source of truth)
+    "search_knowledge_base",
+    # SQL
     "query_running_database",
     # Psychology
     "get_situational_psych_tips",

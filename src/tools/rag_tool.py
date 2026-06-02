@@ -37,13 +37,19 @@ def _get_models():
         with _lock:
             if _client is None:  # double-checked locking
                 try:
-                    _client       = QdrantClient(path=config.QDRANT_PATH)
-                    _dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
-                    _sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
-                    _rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
+                    client       = QdrantClient(path=config.QDRANT_PATH)
+                    dense_model  = SentenceTransformer(config.EMBED_MODEL, device="cpu")
+                    sparse_model = SparseTextEmbedding(model_name=_SPARSE_MODEL)
+                    rerank_model = CrossEncoder(_RERANK_MODEL, device="cpu")
                 except Exception:
                     logger.exception("Failed to initialize RAG models — is the Qdrant DB built?")
                     raise
+                # Only promote to globals after all four succeed so a partial
+                # failure doesn't poison _client and block future retries.
+                _client       = client
+                _dense_model  = dense_model
+                _sparse_model = sparse_model
+                _rerank_model = rerank_model
     return _client, _dense_model, _sparse_model, _rerank_model
 
 
