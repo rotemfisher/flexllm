@@ -27,18 +27,13 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
-    # ── Auth (Chainlit password gate) ─────────────────────────────────────────
-    # Set APP_PASSWORD in .env. Anyone with the Cloudflare URL must know it.
-    # No default — app refuses to start if these are missing from .env.
-    APP_PASSWORD: str
-    # Must be a stable random secret — sessions invalidate if this changes.
-    # Generate with: openssl rand -hex 32
-    CHAINLIT_AUTH_SECRET: str
+    # ── Telegram bot ──────────────────────────────────────────────────────────
+    # Obtain from @BotFather. Required — app refuses to start if missing.
+    TELEGRAM_BOT_TOKEN: str
 
-    # ── Cloudflare Tunnel (optional) ──────────────────────────────────────────
-    # Leave blank → ephemeral *.trycloudflare.com URL printed to logs.
-    # Set a token (from Cloudflare dashboard) → persistent custom domain.
-    CLOUDFLARE_TUNNEL_TOKEN: str = ""
+    # ── Legacy Chainlit fields (kept so existing .env files don't break) ──────
+    APP_PASSWORD: str = ""
+    CHAINLIT_AUTH_SECRET: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

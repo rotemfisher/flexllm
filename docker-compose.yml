@@ -17,13 +17,13 @@ services:
     networks:
       - flexllm
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:6333/healthz || exit 1"]
-      interval: 20s
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' 2>/dev/null || exit 1"]
+      interval: 10s
       timeout: 5s
-      start_period: 10s
-      retries: 3
+      start_period: 15s
+      retries: 5
 
-  # ── Python Chainlit app — LangGraph coaching agent ───────────────────────────
+  # ── Python Telegram bot — LangGraph coaching agent ───────────────────────────
   app:
     build:
       context: .
@@ -42,14 +42,11 @@ services:
       # host.docker.internal resolves to the host on Docker Desktop (Mac/Win).
       # On Linux the extra_hosts entry below maps it via host-gateway.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      # Auth
-      APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD must be set in .env}
-      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:?CHAINLIT_AUTH_SECRET must be set in .env}
+      # Telegram bot token from @BotFather
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
       # Tracing (optional)
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-flexllm-prod}
-      # Chainlit data persistence — appends tables to the existing running.db
-      CHAINLIT_DATABASE_URL: sqlite:////data/personal/running.db
     volumes:
       - ./data:/data:rw
       - model_cache:/root/.cache/huggingface
@@ -93,25 +90,6 @@ services:
     depends_on:
       - app
 
-  # ── Cloudflare Tunnel sidecar ─────────────────────────────────────────────────
-  # Ephemeral mode (default): prints a random *.trycloudflare.com URL to logs.
-  # Persistent mode: set CLOUDFLARE_TUNNEL_TOKEN in .env → maps to your domain.
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: flexllm-cloudflared
-    restart: unless-stopped
-    network_mode: service:app
-    environment:
-      CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
-    entrypoint: /bin/sh
-    command: >
-      -c 'if [ -n "$$CLOUDFLARE_TUNNEL_TOKEN" ];
-          then exec cloudflared tunnel --no-autoupdate --token "$$CLOUDFLARE_TUNNEL_TOKEN";
-          else exec cloudflared tunnel --no-autoupdate --url http://localhost:8000;
-          fi'
-    depends_on:
-      app:
-        condition: service_healthy
 
 volumes:
   model_cache:

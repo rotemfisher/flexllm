@@ -16,12 +16,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── Runtime image ─────────────────────────────────────────────────────────────
 FROM deps AS runtime
 
-# Create non-root user before COPY so --chown works without an extra layer
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# Create non-root user for security.
+RUN groupadd -r appuser && useradd -r -g appuser appuser && chown appuser:appuser /app
 
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser sql/ ./sql/
-COPY --chown=appuser:appuser chainlit_app.py .
+COPY --chown=appuser:appuser etl/ ./etl/
+COPY --chown=appuser:appuser telegram_bot.py .
 
 USER appuser
 
@@ -30,4 +31,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
     CMD curl --fail http://localhost:8000/health || exit 1
 
-CMD ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "telegram_bot.py"]
