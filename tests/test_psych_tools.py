@@ -212,9 +212,7 @@ class TestSearchPsychologyBooks:
         try:
             import src.tools.rag_tool as rag_module
             from qdrant_client.models import FieldCondition, Filter, MatchValue
-            client      = rag_module._client
-            dense_model = rag_module._dense_model
-            # Both must be initialised — client alone isn't enough if model loading failed
+            client, dense_model, _, _ = rag_module._get_models()
             if client is None or dense_model is None:
                 return -1
             return client.count(

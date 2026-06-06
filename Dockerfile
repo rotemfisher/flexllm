@@ -11,7 +11,7 @@ WORKDIR /app
 # ── Dependencies ──────────────────────────────────────────────────────────────
 FROM base AS deps
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --timeout=300 -r requirements.txt
 
 # ── Runtime image ─────────────────────────────────────────────────────────────
 FROM deps AS runtime
@@ -23,6 +23,15 @@ COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser sql/ ./sql/
 COPY --chown=appuser:appuser etl/ ./etl/
 COPY --chown=appuser:appuser telegram_bot.py .
+
+# Pre-download the fastembed ONNX router model as root so the HF xet client
+# can write its logs. Cache lands in /app/.fastembed_cache, then we chown it
+# to appuser. HF scratch goes to /tmp and is discarded after the build step.
+ENV FASTEMBED_CACHE_PATH=/app/.fastembed_cache
+RUN HF_HOME=/tmp/hf_build python -c \
+        "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-small-en-v1.5').embed(['warmup']))" \
+    && chown -R appuser:appuser /app/.fastembed_cache \
+    && rm -rf /tmp/hf_build
 
 USER appuser
 

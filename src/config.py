@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # ── Telegram bot ──────────────────────────────────────────────────────────
     # Obtain from @BotFather. Required — app refuses to start if missing.
     TELEGRAM_BOT_TOKEN: str
+    # Your numeric Telegram user ID (get it from @userinfobot).
+    # The bot ignores every message from any other user ID entirely.
+    TELEGRAM_ALLOWED_USER_ID: int
 
     # ── Legacy Chainlit fields (kept so existing .env files don't break) ──────
     APP_PASSWORD: str = ""

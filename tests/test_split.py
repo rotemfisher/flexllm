@@ -204,6 +204,9 @@ def test_docling_split_extracts_more_content(tmp_path, case):
     meaning Docling was silently dropping content from the wide multi-column page.
     """
 
+    pytest.importorskip("pypdf")
+    pytest.importorskip("docling")
+
     src = case["path"]
     if not src.exists():
         pytest.skip(f"Source PDF not found: {src.name}")

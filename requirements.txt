@@ -7,9 +7,12 @@ pydantic-settings==2.14.1
 qdrant-client==1.18.0
 fastembed==0.8.0
 langsmith==0.8.6
-sentence-transformers==5.5.1
+numpy>=1.26.4
+torch>=2.5.0
+transformers>=4.46.0
+sentence-transformers>=3.3.1
 pytest==9.0.3
-numpy==2.4.6
+aiosqlite==0.20.0
 # Telegram bot + health API
 python-telegram-bot[ext]>=21.0
 fastapi==0.136.3
@@ -18,3 +21,6 @@ uvicorn[standard]==0.48.0
 watchdog==6.0.0
 # Evaluation
 ragas==0.2.15
+# PDF page splitting and extraction (used in ETL and test_split.py)
+pypdf==5.6.0
+docling

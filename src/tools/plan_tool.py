@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -18,14 +17,14 @@ _PLAN_WORKOUT_TYPES  = {
 
 
 @tool
-def save_workout_plan(week_start: str, sessions: str) -> str:
+def save_workout_plan(week_start: str, sessions: list[dict]) -> str:
     """
     Save a weekly training plan to the database. Replaces any existing plan for that week.
     Call this after generating a workout plan for the athlete.
 
     Args:
         week_start: The Sunday that starts the plan week in 'YYYY-MM-DD' format.
-        sessions: JSON array string where each object has:
+        sessions: List of session objects. Each object must have:
             Required:
               - day_date (str, YYYY-MM-DD)
               - activity_type (str: 'running' | 'strength' | 'rest' | 'cross_training')
@@ -39,19 +38,8 @@ def save_workout_plan(week_start: str, sessions: str) -> str:
               - phase (str: 'onboarding'|'base'|'build'|'peak'|'race'|'recovery'|'return_to_run')
               - is_assessment (int: 1 for progress test / physical exam sessions, else 0)
               - notes (str: coach rationale)
-
-    Example sessions value:
-        '[{"day_date":"2026-06-02","activity_type":"running","workout_type":"easy",
-           "description":"45 min easy run at E pace","intensity":"easy",
-           "target_duration_min":45,"phase":"base"},
-          {"day_date":"2026-06-05","activity_type":"running","workout_type":"assessment",
-           "description":"2km time trial — record time for VDOT update",
-           "intensity":"hard","is_assessment":1,"phase":"base"}]'
     """
-    try:
-        plan = json.loads(sessions)
-    except json.JSONDecodeError as exc:
-        return f"Error: sessions must be a valid JSON array. {exc}"
+    plan = sessions
 
     required = {"day_date", "activity_type", "workout_type", "description", "intensity"}
     for i, s in enumerate(plan):
@@ -177,7 +165,7 @@ def get_current_workout_plan() -> str:
 
 
 @tool
-def replace_day_in_plan(week_start: str, day_date: str, sessions: str) -> str:
+def replace_day_in_plan(week_start: str, day_date: str, sessions: list[dict]) -> str:
     """
     Replace all sessions for a single day within an existing weekly plan.
     Use this to adjust, swap, or add a session for one day without
@@ -186,12 +174,9 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: str) -> str:
     Args:
         week_start: The Sunday that starts the plan week in 'YYYY-MM-DD' format.
         day_date: The specific day to update in 'YYYY-MM-DD' format.
-        sessions: JSON array of session objects — same schema as save_workout_plan.
+        sessions: List of session objects — same schema as save_workout_plan.
     """
-    try:
-        plan = json.loads(sessions)
-    except json.JSONDecodeError as exc:
-        return f"Error: sessions must be a valid JSON array. {exc}"
+    plan = sessions
 
     required = {"activity_type", "workout_type", "description", "intensity"}
     for i, s in enumerate(plan):

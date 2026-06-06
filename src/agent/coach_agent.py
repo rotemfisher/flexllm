@@ -1,5 +1,5 @@
 import sqlite3
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
 from src.config import config
 from src.agent.graph import build_multi_agent_graph
@@ -55,7 +55,7 @@ def get_athlete_context() -> str:
     return "\n\n".join(parts)
 
 
-@contextmanager
-def build_coach_graph():
-    with build_multi_agent_graph() as graph:
+@asynccontextmanager
+async def build_coach_graph():
+    async with build_multi_agent_graph() as graph:
         yield graph

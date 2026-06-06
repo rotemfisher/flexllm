@@ -1,8 +1,12 @@
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+import logging
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+
+logger = logging.getLogger(__name__)
 from langchain_ollama import ChatOllama
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -86,6 +90,40 @@ def _make_agent_node(llm_with_tools, prompt_builder):
         messages = [SystemMessage(content=system_prompt)] + history
         response = llm_with_tools.invoke(messages)
         response = _resolve_tool_conflicts(response)
+
+        has_tool_calls = bool(getattr(response, "tool_calls", None))
+        content = response.content if isinstance(response.content, str) else ""
+        is_empty = not content.strip()
+
+        # Detect "announcement without action": model wrote "let me fetch X" after
+        # receiving tool results but did not actually call the tool.
+        last_hist = history[-1] if history else None
+        is_mid_sequence = isinstance(last_hist, ToolMessage)
+        _ANNOUNCEMENT_PHRASES = (
+            "let me fetch", "let me check", "let me get", "let me look",
+            "i will now", "i'll now", "i need to fetch", "i need to check",
+            "let me retrieve", "let me pull", "let me gather",
+        )
+        is_announcement = (
+            is_mid_sequence
+            and not has_tool_calls
+            and not is_empty
+            and any(p in content.lower() for p in _ANNOUNCEMENT_PHRASES)
+        )
+
+        if is_empty or is_announcement:
+            reason_tag = "empty response" if is_empty else "announcement without tool call"
+            logger.warning("Model produced %s — retrying with nudge", reason_tag)
+            nudge = messages + [
+                response,
+                HumanMessage(content=(
+                    "Stop announcing what you will do — call the required tool right now. "
+                    "Do not write any text until all needed tool calls are complete."
+                )),
+            ]
+            response = llm_with_tools.invoke(nudge)
+            response = _resolve_tool_conflicts(response)
+
         return {"messages": [response], "handoff_reason": None}
     return call_model
 
@@ -101,9 +139,9 @@ def _should_continue(tools_node_name: str):
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
 
-@contextmanager
-def build_multi_agent_graph():
-    llm = ChatOllama(model=config.MODEL_ID, temperature=0, base_url=config.OLLAMA_BASE_URL)
+@asynccontextmanager
+async def build_multi_agent_graph():
+    llm = ChatOllama(model=config.MODEL_ID, temperature=0, base_url=config.OLLAMA_BASE_URL, num_ctx=32768)
 
     trainer_llm      = llm.bind_tools(TRAINER_TOOLS)
     physio_llm       = llm.bind_tools(PHYSIO_TOOLS)
@@ -166,6 +204,5 @@ def build_multi_agent_graph():
     graph.add_edge("dietitian_tools",    "dietitian")
     graph.add_edge("psychologist_tools", "psychologist")
 
-    # Yield the compiled graph with a SqliteSaver checkpointer. Using a context manager ensures the checkpointer connection is properly closed after use.
-    with SqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(str(config.DB_PATH)) as checkpointer:
         yield graph.compile(checkpointer=checkpointer)

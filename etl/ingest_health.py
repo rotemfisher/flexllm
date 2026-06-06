@@ -24,6 +24,7 @@ Usage:
 import argparse
 import logging
 import math
+import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -115,13 +116,24 @@ _RING_COLUMN_UPDATE: dict[str, str] = {
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+# Apple Health timestamps: "YYYY-MM-DD HH:MM:SS ±HHMM"
+# Python 3.10 fromisoformat requires "±HH:MM" (colon, no leading space).
+_TZ_RE = re.compile(r'\s*([+-])(\d{2})(\d{2})$')
+
+
+def _normalize_ts(s: str) -> str:
+    """Convert Apple Health / HealthKit timestamp to a fromisoformat-safe string."""
+    s = s.strip().replace("Z", "+00:00")
+    return _TZ_RE.sub(r'\1\2:\3', s)
+
+
 def _ts(s: Optional[str]) -> Optional[str]:
     """Parse any HealthKit/GPX timestamp to UTC 'YYYY-MM-DD HH:MM:SS'."""
     if not s:
         return None
     try:
         return (
-            datetime.fromisoformat(s.replace("Z", "+00:00"))
+            datetime.fromisoformat(_normalize_ts(s))
             .astimezone(timezone.utc)
             .strftime("%Y-%m-%d %H:%M:%S")
         )
@@ -152,8 +164,8 @@ def _f_to_c(val: Optional[float]) -> Optional[float]:
 def _dur_min(start_raw: str, end_raw: str) -> float:
     """Duration in minutes between two raw HealthKit timestamps."""
     return (
-        datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
-        - datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        datetime.fromisoformat(_normalize_ts(end_raw))
+        - datetime.fromisoformat(_normalize_ts(start_raw))
     ).total_seconds() / 60
 
 

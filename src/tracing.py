@@ -32,7 +32,9 @@ def setup_tracing(project: str | None = None) -> bool:
     effective_project = project or config.LANGCHAIN_PROJECT
 
     os.environ["LANGSMITH_API_KEY"] = config.LANGSMITH_API_KEY
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGSMITH_TRACING"] = "true"        # langsmith >= 0.2
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"     # kept for older langchain builds
+    os.environ["LANGSMITH_PROJECT"] = effective_project
     os.environ["LANGCHAIN_PROJECT"] = effective_project
     # Ship traces in a background thread so the main thread is never blocked.
     os.environ["LANGCHAIN_CALLBACKS_BACKGROUND"] = "true"

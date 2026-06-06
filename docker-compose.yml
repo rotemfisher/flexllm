@@ -42,8 +42,11 @@ services:
       # host.docker.internal resolves to the host on Docker Desktop (Mac/Win).
       # On Linux the extra_hosts entry below maps it via host-gateway.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      HF_HOME: /data/hf_cache
       # Telegram bot token from @BotFather
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
+      # Your numeric Telegram user ID from @userinfobot — bot ignores all others
+      TELEGRAM_ALLOWED_USER_ID: ${TELEGRAM_ALLOWED_USER_ID:?TELEGRAM_ALLOWED_USER_ID must be set in .env}
       # Tracing (optional)
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-flexllm-prod}
@@ -54,6 +57,9 @@ services:
       - "8000:8000"
     networks:
       - flexllm
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
