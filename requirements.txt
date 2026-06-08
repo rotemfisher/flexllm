@@ -1,5 +1,6 @@
 langgraph==1.2.2
-langgraph-checkpoint-sqlite==3.1.0
+langgraph-checkpoint-postgres
+psycopg[binary]>=3.1.5
 langchain-ollama==1.1.0
 python-dotenv==1.2.2
 pydantic==2.13.4
@@ -12,7 +13,6 @@ torch>=2.5.0
 transformers>=4.46.0
 sentence-transformers>=3.3.1
 pytest==9.0.3
-aiosqlite==0.20.0
 # Telegram bot + health API
 python-telegram-bot[ext]>=21.0
 fastapi==0.136.3

@@ -30,7 +30,7 @@ def log_workout_rpe_and_notes(rpe: int, notes: str, date: str | None = None, act
             workout = con.execute(
                 """
                 SELECT id FROM workouts
-                WHERE activity_type = ? AND start_date LIKE ?
+                WHERE activity_type = %s AND start_date::text LIKE %s
                 ORDER BY start_date DESC LIMIT 1
                 """,
                 (activity_type, f"{date}%"),
@@ -40,8 +40,8 @@ def log_workout_rpe_and_notes(rpe: int, notes: str, date: str | None = None, act
                 return f"Error: No {activity_type} workout found on {date}. Cannot log RPE."
 
             con.execute(
-                "UPDATE workouts SET rpe = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (rpe, notes, workout[0]),
+                "UPDATE workouts SET rpe = %s, notes = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (rpe, notes, workout["id"]),
             )
             con.commit()
         return f"Successfully logged RPE {rpe} and notes for the {activity_type} workout on {date}."

@@ -12,3 +12,4 @@ class CoachState(TypedDict):
     handoff_reason: str | None
     prefetched_context: str  # populated by gather_trainer_context; empty for non-trainer agents
     conversation_summary: str  # rolling summary of pruned tool messages; injected into system prompt
+    pending_agents: list[str]  # supervisor-queued agents to activate after primary finishes

@@ -5,7 +5,7 @@ Architecture
 ------------
 After each CLI session (or explicitly triggered), coaching messages are
 compressed into concise daily summaries stored in the `conversation_summaries`
-SQLite table.  A weekly rollup is generated from those daily notes.
+table.  A weekly rollup is generated from those daily notes.
 
 At session start, SummaryStore.format_for_context() injects the most recent
 summaries into athlete_context so every agent has long-term memory without
@@ -19,7 +19,8 @@ Summary hierarchy
 
 from __future__ import annotations
 
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 from datetime import date, timedelta
 from typing import Optional
 
@@ -49,24 +50,25 @@ def _messages_to_text(messages: list[BaseMessage]) -> str:
 # ── SummaryStore ──────────────────────────────────────────────────────────────
 
 class SummaryStore:
-    """Thin SQLite wrapper for daily and weekly coaching summaries."""
+    """PostgreSQL-backed store for daily and weekly coaching summaries."""
 
-    def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
+    def __init__(self) -> None:
+        from src.config import config
+        self._dsn = config.DATABASE_URL
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with psycopg.connect(self._dsn) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversation_summaries (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    summary_date TEXT    NOT NULL,
-                    week_start   TEXT    NOT NULL,
-                    domain       TEXT    NOT NULL,
-                    summary_type TEXT    NOT NULL,
-                    content      TEXT    NOT NULL,
+                    id           BIGSERIAL PRIMARY KEY,
+                    summary_date TEXT      NOT NULL,
+                    week_start   TEXT      NOT NULL,
+                    domain       TEXT      NOT NULL,
+                    summary_type TEXT      NOT NULL,
+                    content      TEXT      NOT NULL,
                     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(summary_date, domain, summary_type) ON CONFLICT REPLACE
+                    UNIQUE(summary_date, domain, summary_type)
                 )
             """)
 
@@ -78,42 +80,45 @@ class SummaryStore:
         content: str,
     ) -> None:
         ws = _week_start(summary_date)
-        with sqlite3.connect(self.db_path) as conn:
+        with psycopg.connect(self._dsn) as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO conversation_summaries
+                INSERT INTO conversation_summaries
                     (summary_date, week_start, domain, summary_type, content)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (summary_date, domain, summary_type) DO UPDATE
+                    SET content    = EXCLUDED.content,
+                        week_start = EXCLUDED.week_start
                 """,
                 (summary_date.isoformat(), ws.isoformat(), domain, summary_type, content),
             )
 
     def get_recent_daily(self, days: int = 7) -> list[dict]:
         cutoff = (date.today() - timedelta(days=days)).isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as conn:
             rows = conn.execute(
                 """
                 SELECT summary_date, domain, content
                 FROM   conversation_summaries
-                WHERE  summary_type = 'daily' AND summary_date >= ?
+                WHERE  summary_type = 'daily' AND summary_date >= %s
                 ORDER  BY summary_date DESC, domain
                 """,
                 (cutoff,),
             ).fetchall()
-        return [{"date": r[0], "domain": r[1], "content": r[2]} for r in rows]
+        return [{"date": r["summary_date"], "domain": r["domain"], "content": r["content"]} for r in rows]
 
     def get_current_week_summary(self) -> Optional[str]:
         ws = _week_start(date.today()).isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as conn:
             row = conn.execute(
                 """
                 SELECT content FROM conversation_summaries
-                WHERE  summary_type = 'weekly' AND week_start = ?
+                WHERE  summary_type = 'weekly' AND week_start = %s
                 ORDER  BY created_at DESC LIMIT 1
                 """,
                 (ws,),
             ).fetchone()
-        return row[0] if row else None
+        return row["content"] if row else None
 
     def format_for_context(self) -> str:
         """Return a compact context block to prepend to athlete_context.

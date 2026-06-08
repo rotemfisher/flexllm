@@ -42,6 +42,7 @@ def trainer_transfer(
         update={
             "active_agent": target,
             "handoff_reason": reason,
+            "pending_agents": [],
             "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
         },
     )
@@ -74,6 +75,7 @@ def physio_transfer(
         update={
             "active_agent": target,
             "handoff_reason": reason,
+            "pending_agents": [],
             "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
         },
     )
@@ -106,6 +108,7 @@ def recovery_transfer(
         update={
             "active_agent": target,
             "handoff_reason": reason,
+            "pending_agents": [],
             "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
         },
     )
@@ -138,6 +141,7 @@ def dietitian_transfer(
         update={
             "active_agent": target,
             "handoff_reason": reason,
+            "pending_agents": [],
             "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
         },
     )
@@ -170,6 +174,7 @@ def psychologist_transfer(
         update={
             "active_agent": target,
             "handoff_reason": reason,
+            "pending_agents": [],
             "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
         },
     )

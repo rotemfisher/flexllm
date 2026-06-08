@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = "flexllm-coach-local"
     ENVIRONMENT: str = "local"  # local | dev | staging | prod
 
-    # ── Data paths ────────────────────────────────────────────────────────────
+    # ── Database ──────────────────────────────────────────────────────────────
+    DATABASE_URL: str = "postgresql://localhost:5432/flexllm"
+    # Legacy SQLite path — kept for ETL scripts and one-time data import only.
     DB_PATH: Path = _PROJECT_ROOT / "data" / "personal" / "running.db"
     QDRANT_PATH: Path = _PROJECT_ROOT / "data" / "qdrant_db"
     # When running the dedicated qdrant container, set QDRANT_URL (e.g.

@@ -63,17 +63,17 @@ def log_strength_sets(workout_id: int, sets_json: str) -> str:
 
     try:
         with db_rw() as con:
-            if not con.execute("SELECT id FROM workouts WHERE id = ?", (workout_id,)).fetchone():
+            if not con.execute("SELECT id FROM workouts WHERE id = %s", (workout_id,)).fetchone():
                 return f"Error: workout ID {workout_id} not found."
 
             # Clear existing sets for this workout to allow re-logging
-            con.execute("DELETE FROM strength_sets WHERE workout_id = ?", (workout_id,))
+            con.execute("DELETE FROM strength_sets WHERE workout_id = %s", (workout_id,))
             for s in sets:
                 con.execute(
                     """
                     INSERT INTO strength_sets
                         (workout_id, exercise_name, set_number, weight_kg, reps, duration_sec, rpe, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         workout_id,
@@ -133,7 +133,7 @@ def get_recent_strength_sets(exercise_name: str, sessions: int = 4) -> str:
                 SELECT DISTINCT ss.workout_id, w.start_date
                 FROM strength_sets ss
                 JOIN workouts w ON w.id = ss.workout_id
-                WHERE ss.exercise_name = ?
+                WHERE ss.exercise_name = %s
                 ORDER BY w.start_date DESC
                 LIMIT ?
                 """,
@@ -154,7 +154,7 @@ def get_recent_strength_sets(exercise_name: str, sessions: int = 4) -> str:
                     """
                     SELECT set_number, weight_kg, reps, duration_sec, rpe
                     FROM strength_sets
-                    WHERE workout_id = ? AND exercise_name = ?
+                    WHERE workout_id = %s AND exercise_name = %s
                     ORDER BY set_number
                     """,
                     (wrow["workout_id"], name),
@@ -195,7 +195,7 @@ def get_recent_strength_sets(exercise_name: str, sessions: int = 4) -> str:
                 last_sets = con.execute(
                     """
                     SELECT weight_kg, reps FROM strength_sets
-                    WHERE workout_id = ? AND exercise_name = ?
+                    WHERE workout_id = %s AND exercise_name = %s
                     ORDER BY set_number DESC LIMIT 1
                     """,
                     (workout_ids[0]["workout_id"], name),

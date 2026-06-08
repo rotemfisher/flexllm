@@ -1,26 +1,24 @@
 import logging
-import sqlite3
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
-from src.config import config
 from src.tools._utils import db_ro, db_rw, epley_1rm
 
 logger = logging.getLogger(__name__)
 
 
-def _pace_to_vdot(pace_sec_per_km: float, con: sqlite3.Connection) -> float | None:
+def _pace_to_vdot(pace_sec_per_km: float, con) -> float | None:
     """Find the closest VDOT where T-pace matches the given pace (reverse lookup)."""
     row = con.execute(
         """
         SELECT vdot FROM vdot_paces
-        ORDER BY ABS(t_pace_sec - ?) ASC
+        ORDER BY ABS(t_pace_sec - %s) ASC
         LIMIT 1
         """,
         (pace_sec_per_km,),
     ).fetchone()
-    return row[0] if row else None
+    return row["vdot"] if row else None
 
 
 @tool
@@ -132,8 +130,6 @@ def log_fitness_assessment(
 
     try:
         with db_rw() as con:
-            con.row_factory = sqlite3.Row
-
             # Auto-compute derived values
             if assessment_type in ("onboarding_run", "time_trial"):
                 if metric_name == "time_sec" and distance_km is not None:
@@ -147,21 +143,20 @@ def log_fitness_assessment(
                 # Cooper: VO2max ≈ (distance_m - 504.9) / 44.73, then VDOT ≈ VO2max
                 vo2max = (metric_value - 504.9) / 44.73
                 row = con.execute(
-                    "SELECT vdot FROM vdot_paces ORDER BY ABS(vdot - ?) ASC LIMIT 1", (vo2max,)
+                    "SELECT vdot FROM vdot_paces ORDER BY ABS(vdot - %s) ASC LIMIT 1", (vo2max,)
                 ).fetchone()
-                estimated_vdot = row[0] if row else None
+                estimated_vdot = row["vdot"] if row else None
 
             elif assessment_type in ("onboarding_strength", "strength_1rm") and metric_name == "weight_kg":
                 if reps is not None:
                     estimated_1rm_kg = round(epley_1rm(metric_value, reps), 1)
 
-            con.row_factory = None
             con.execute(
                 """
                 INSERT INTO fitness_assessments
                     (assessment_date, assessment_type, exercise_name, metric_name,
                      metric_value, estimated_vdot, estimated_1rm_kg, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (today, assessment_type, exercise_name, metric_name,
                  metric_value, estimated_vdot, estimated_1rm_kg, notes),
@@ -200,8 +195,8 @@ def get_fitness_assessments(assessment_type: str | None = None, limit: int = 6) 
                     SELECT assessment_date, assessment_type, exercise_name, metric_name,
                            metric_value, estimated_vdot, estimated_1rm_kg, notes
                     FROM fitness_assessments
-                    WHERE assessment_type = ?
-                    ORDER BY assessment_date DESC LIMIT ?
+                    WHERE assessment_type = %s
+                    ORDER BY assessment_date DESC LIMIT %s
                     """,
                     (assessment_type, limit),
                 ).fetchall()
@@ -211,7 +206,7 @@ def get_fitness_assessments(assessment_type: str | None = None, limit: int = 6) 
                     SELECT assessment_date, assessment_type, exercise_name, metric_name,
                            metric_value, estimated_vdot, estimated_1rm_kg, notes
                     FROM fitness_assessments
-                    ORDER BY assessment_date DESC LIMIT ?
+                    ORDER BY assessment_date DESC LIMIT %s
                     """,
                     (limit,),
                 ).fetchall()

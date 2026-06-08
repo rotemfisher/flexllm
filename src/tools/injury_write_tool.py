@@ -58,13 +58,14 @@ def log_injury(
                 INSERT INTO injuries
                     (onset_date, body_part, side, injury_type, cause,
                      severity, status, pain_scale, pain_context, notes)
-                VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                RETURNING id
                 """,
                 (onset_date, body_part, side, injury_type, cause,
                  severity, pain_scale, pain_context, notes),
             )
+            injury_id = cur.fetchone()["id"]
             con.commit()
-            injury_id = cur.lastrowid
         return (
             f"Injury logged (ID {injury_id}): {severity} {side} {body_part}"
             + (f" ({injury_type})" if injury_type else "")
@@ -103,24 +104,24 @@ def log_injury_checkin(
     try:
         with db_rw() as con:
             row = con.execute(
-                "SELECT body_part, side, pain_scale FROM injuries WHERE id = ?", (injury_id,)
+                "SELECT body_part, side, pain_scale FROM injuries WHERE id = %s", (injury_id,)
             ).fetchone()
             if not row:
                 return f"Error: injury ID {injury_id} not found. Use get_active_injuries to see current IDs."
 
-            prev_pain = row[2]
+            prev_pain = row["pain_scale"]
             con.execute(
                 """
                 INSERT INTO injury_checks (injury_id, check_date, pain_scale, pain_context, notes)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
                 (injury_id, today, pain_scale, pain_context, notes),
             )
             con.execute(
                 """
                 UPDATE injuries
-                SET pain_scale = ?, pain_context = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET pain_scale = %s, pain_context = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
                 """,
                 (pain_scale, pain_context, injury_id),
             )
@@ -137,7 +138,7 @@ def log_injury_checkin(
                 trend = f" (unchanged from {prev_pain}/10)"
 
         return (
-            f"Check-in recorded for {row[1]} {row[0]} (ID {injury_id}): "
+            f"Check-in recorded for {row['side']} {row['body_part']} (ID {injury_id}): "
             f"pain {pain_scale}/10 ({pain_context}) on {today}{trend}."
         )
     except Exception as exc:
@@ -159,18 +160,18 @@ def resolve_injury(injury_id: int, notes: str | None = None) -> str:
     try:
         with db_rw() as con:
             row = con.execute(
-                "SELECT body_part, side, status FROM injuries WHERE id = ?", (injury_id,)
+                "SELECT body_part, side, status FROM injuries WHERE id = %s", (injury_id,)
             ).fetchone()
             if not row:
                 return f"Error: injury ID {injury_id} not found."
-            if row[2] == "resolved":
+            if row["status"] == "resolved":
                 return f"Injury ID {injury_id} is already marked as resolved."
 
             con.execute(
                 """
                 UPDATE injuries
-                SET status = 'resolved', resolved_date = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET status = 'resolved', resolved_date = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
                 """,
                 (today, injury_id),
             )
@@ -178,12 +179,12 @@ def resolve_injury(injury_id: int, notes: str | None = None) -> str:
                 con.execute(
                     """
                     INSERT INTO injury_checks (injury_id, check_date, pain_scale, pain_context, notes)
-                    VALUES (?, ?, 0, 'rest', ?)
+                    VALUES (%s, %s, 0, 'rest', %s)
                     """,
                     (injury_id, today, f"Resolved: {notes}"),
                 )
             con.commit()
-        return f"Injury resolved: {row[1]} {row[0]} (ID {injury_id}) marked as recovered on {today}."
+        return f"Injury resolved: {row['side']} {row['body_part']} (ID {injury_id}) marked as recovered on {today}."
     except Exception as exc:
         logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

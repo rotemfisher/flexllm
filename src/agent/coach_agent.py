@@ -1,9 +1,8 @@
-import sqlite3
 from contextlib import asynccontextmanager
 
-from src.config import config
 from src.agent.graph import build_multi_agent_graph
 from src.agent.memory import SummaryStore
+from src.tools._utils import db_ro
 from src.tracing import traceable
 import logging
 
@@ -21,12 +20,10 @@ def get_athlete_context() -> str:
 
     # ── Athlete profile ───────────────────────────────────────────────────────
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-        profile = con.execute(
-            "SELECT fitness_level, current_goal, secondary_goal FROM athlete_profile ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        con.close()
+        with db_ro() as con:
+            profile = con.execute(
+                "SELECT fitness_level, current_goal, secondary_goal FROM athlete_profile ORDER BY id DESC LIMIT 1"
+            ).fetchone()
     except Exception as exc:
         logger.error("Failed to load profile", exc_info=True)
         return f"(Unable to load athlete profile: {exc})"
@@ -44,19 +41,17 @@ def get_athlete_context() -> str:
 
     # ── Recent workouts (last 8 weeks) ───────────────────────────────────────
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-        workouts = con.execute(
-            """
-            SELECT activity_type, start_date, distance_km, duration_min,
-                   avg_heart_rate_bpm, avg_speed_kmh, training_stress_score
-            FROM workouts
-            WHERE start_date >= date('now', '-56 days')
-            ORDER BY start_date DESC
-            LIMIT 20
-            """
-        ).fetchall()
-        con.close()
+        with db_ro() as con:
+            workouts = con.execute(
+                """
+                SELECT activity_type, start_date, distance_km, duration_min,
+                       avg_heart_rate_bpm, avg_speed_kmh, training_stress_score
+                FROM workouts
+                WHERE start_date >= CURRENT_DATE - INTERVAL '56 days'
+                ORDER BY start_date DESC
+                LIMIT 20
+                """
+            ).fetchall()
 
         if workouts:
             lines = ["=== RECENT WORKOUTS (last 8 weeks) ==="]
@@ -80,7 +75,7 @@ def get_athlete_context() -> str:
 
     # ── Conversation summaries (long-term memory) ─────────────────────────────
     try:
-        store = SummaryStore(str(config.DB_PATH))
+        store = SummaryStore()
         summary_block = store.format_for_context()
         if summary_block:
             parts.append(summary_block)

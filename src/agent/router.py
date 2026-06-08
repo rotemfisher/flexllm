@@ -1,23 +1,108 @@
 """
-Semantic entry router for the multi-agent coaching graph.
+Multi-intent supervisor router for the multi-agent coaching graph.
 
-Uses BAAI/bge-small-en-v1.5 (67MB ONNX, via fastembed) to embed the user
-message and compute cosine similarity against per-domain anchor sentences.
-The closest domain wins. Model and anchor embeddings are computed once and
-cached for the lifetime of the process.
+Primary path: an LLM call that returns JSON identifying which specialist(s)
+should handle the current message.  Supports multi-intent queries by returning
+a primary agent plus an ordered list of secondary agents that will be activated
+automatically after the primary finishes.
+
+Fallback path: BAAI/bge-small-en-v1.5 cosine-similarity (original single-agent
+router) — used when the LLM call fails or returns unparseable output.
+
+make_supervisor_node(llm) returns a LangGraph node function suitable for
+graph.add_node("supervisor", make_supervisor_node(llm)).
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from functools import lru_cache
 
 import numpy as np
 
 from src.models.agent_state import CoachState
 
-# ── Domain anchors ────────────────────────────────────────────────────────────
-# Representative sentences that describe each domain's scope.
-# More diverse anchors → better coverage of real user phrasing.
+logger = logging.getLogger(__name__)
+
+# ── Valid agent names ─────────────────────────────────────────────────────────
+
+_VALID_AGENTS = frozenset(
+    {"trainer", "physiotherapist", "recovery_coach", "dietitian", "psychologist"}
+)
+
+# ── LLM supervisor ────────────────────────────────────────────────────────────
+
+_SUPERVISOR_PROMPT = """\
+You are a routing supervisor for a sports coaching AI with five specialists.
+
+Specialists:
+- "trainer": training plans, workouts, running performance, pace, VDOT, periodization, strength programs
+- "physiotherapist": pain, injury, soreness, swelling, strain, sprain, fracture, rehabilitation
+- "recovery_coach": fatigue, HRV, sleep, readiness, overtraining, rest days
+- "dietitian": nutrition, food, calories, macros, meal plan, weight management, fueling, supplements
+- "psychologist": motivation, anxiety, mental blocks, confidence, performance mindset, race nerves
+
+Analyse the user message. Return ONLY valid JSON — no markdown, no explanation:
+{"primary": "<specialist>", "secondary": [<up to 2 additional specialists if multiple distinct topics>]}
+
+Rules:
+1. "secondary" is [] when the message covers a single topic.
+2. List at most 2 secondary agents.
+3. Only use the exact specialist names above.
+
+Examples:
+"I twisted my ankle" → {"primary": "physiotherapist", "secondary": []}
+"I twisted my ankle and I need to update my nutrition plan for tomorrow" → {"primary": "physiotherapist", "secondary": ["dietitian"]}
+"Build me a training plan for my 10k" → {"primary": "trainer", "secondary": []}
+"I have no motivation and I'm not sleeping well" → {"primary": "psychologist", "secondary": ["recovery_coach"]}
+"I'm injured and feeling burned out and need diet help" → {"primary": "physiotherapist", "secondary": ["recovery_coach", "dietitian"]}\
+"""
+
+
+def _route_by_llm(message: str, llm) -> dict | None:
+    """Call the LLM supervisor and return {"primary": ..., "secondary": [...]}.
+
+    Returns None on any error so the caller can fall back to embedding routing.
+    """
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        response = llm.invoke(
+            [SystemMessage(content=_SUPERVISOR_PROMPT), HumanMessage(content=message)]
+        )
+        raw = response.content.strip() if isinstance(response.content, str) else ""
+
+        # Try direct parse first, then extract the first JSON object.
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            m = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
+            if not m:
+                logger.debug("Supervisor LLM: no JSON object found in %r", raw[:120])
+                return None
+            data = json.loads(m.group(0))
+
+        primary = data.get("primary", "")
+        if primary not in _VALID_AGENTS:
+            logger.debug("Supervisor LLM: unknown primary %r", primary)
+            return None
+
+        secondary = [
+            a for a in (data.get("secondary") or [])
+            if a in _VALID_AGENTS and a != primary
+        ][:2]
+
+        logger.debug("Supervisor LLM: primary=%s secondary=%s", primary, secondary)
+        return {"primary": primary, "secondary": secondary}
+
+    except Exception:
+        logger.debug("Supervisor LLM call failed", exc_info=True)
+        return None
+
+
+# ── Embedding fallback ────────────────────────────────────────────────────────
 
 _DOMAIN_ANCHORS: dict[str, list[str]] = {
     "physiotherapist": [
@@ -119,14 +204,14 @@ _ROUTER_MODEL = "BAAI/bge-small-en-v1.5"
 
 @lru_cache(maxsize=1)
 def _load() -> tuple:
-    """Load model and pre-compute mean anchor embeddings. Called once, cached."""
+    """Load embedding model and pre-compute mean anchor vectors. Called once, cached."""
     from fastembed import TextEmbedding
 
     model = TextEmbedding(model_name=_ROUTER_MODEL)
     domain_vecs: dict[str, np.ndarray] = {}
     for domain, sentences in _DOMAIN_ANCHORS.items():
-        embs = np.array(list(model.embed(sentences)))  # (N, D)
-        domain_vecs[domain] = embs.mean(axis=0)        # (D,)
+        embs = np.array(list(model.embed(sentences)))
+        domain_vecs[domain] = embs.mean(axis=0)
     return model, domain_vecs
 
 
@@ -135,25 +220,46 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (denom + 1e-9))
 
 
-def route_entry(state: CoachState) -> str:
-    """
-    Return the name of the agent node that should handle this turn.
-
-    Mid-session (active_agent already set): stay with the current agent so
-    handoffs are honoured across turns.
-    New session: embed the user message and pick the closest domain.
-    """
-    if state.get("active_agent"):
-        return state["active_agent"]
-
-    last_human = next(
-        (m for m in reversed(state["messages"]) if m.type == "human"), None
-    )
-    if last_human is None:
-        return "trainer"
-
+def _route_by_embedding(message: str) -> str:
+    """Return the closest domain agent for *message* using cosine similarity."""
     model, domain_vecs = _load()
-    msg_vec = np.array(next(iter(model.embed([last_human.content]))))
-
+    msg_vec = np.array(next(iter(model.embed([message]))))
     scores = {domain: _cosine(msg_vec, vec) for domain, vec in domain_vecs.items()}
     return max(scores, key=scores.get)
+
+
+# ── Supervisor node factory ───────────────────────────────────────────────────
+
+def make_supervisor_node(llm):
+    """Return a LangGraph node function that routes the first message of a session.
+
+    Mid-session (active_agent already set): no-op — the current agent continues.
+    New session: calls the LLM supervisor for multi-intent detection; falls back
+    to embedding similarity when the LLM fails or returns invalid JSON.
+    """
+
+    def supervisor(state: CoachState) -> dict:
+        if state.get("active_agent"):
+            return {}
+
+        last_human = next(
+            (m for m in reversed(state["messages"]) if m.type == "human"), None
+        )
+        if last_human is None:
+            return {"active_agent": "trainer", "pending_agents": []}
+
+        message = last_human.content
+
+        result = _route_by_llm(message, llm)
+        if result is not None:
+            return {
+                "active_agent": result["primary"],
+                "pending_agents": result["secondary"],
+            }
+
+        # LLM failed — fall back to embedding (single agent, no secondary)
+        logger.warning("Supervisor LLM unavailable — falling back to embedding router")
+        primary = _route_by_embedding(message)
+        return {"active_agent": primary, "pending_agents": []}
+
+    return supervisor

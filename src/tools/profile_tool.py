@@ -20,7 +20,7 @@ _ALLOWED_FIELDS = {
 # building SQL strings dynamically in a hot path is an avoidable smell).
 _UPDATE_SQL: dict[str, str] = {
     field: (
-        f"UPDATE athlete_profile SET {field} = ?, updated_at = CURRENT_TIMESTAMP"
+        f"UPDATE athlete_profile SET {field} = %s, updated_at = CURRENT_TIMESTAMP"
         " WHERE id = (SELECT MAX(id) FROM athlete_profile)"
     )
     for field in _ALLOWED_FIELDS
@@ -47,9 +47,9 @@ def update_athlete_profile(field: str, value: str) -> str:
 
     try:
         with db_rw() as con:
-            con.execute(_UPDATE_SQL[field], (value,))
+            cur = con.execute(_UPDATE_SQL[field], (value,))
             con.commit()
-            if con.total_changes == 0:
+            if cur.rowcount == 0:
                 return "No athlete profile found. Create a profile first."
         return f"Updated athlete_profile.{field} = '{value}'"
     except Exception as exc:

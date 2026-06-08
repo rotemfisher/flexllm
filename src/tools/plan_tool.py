@@ -63,12 +63,11 @@ def save_workout_plan(week_start: str, sessions: list[WorkoutSession]) -> str:
     """
     try:
         with db_rw() as con:
-            con.execute("BEGIN")
             # Soft-delete existing sessions for this week instead of hard-deleting,
             # so an LLM hallucinating the wrong week_start never destroys history.
             con.execute(
-                "UPDATE planned_workouts SET deleted_at = strftime('%Y-%m-%d %H:%M:%S', 'now') "
-                "WHERE week_start = ? AND deleted_at IS NULL",
+                "UPDATE planned_workouts SET deleted_at = NOW() "
+                "WHERE week_start = %s AND deleted_at IS NULL",
                 (week_start,),
             )
             for order, s in enumerate(sessions, start=1):
@@ -78,7 +77,7 @@ def save_workout_plan(week_start: str, sessions: list[WorkoutSession]) -> str:
                         (week_start, day_date, session_order, activity_type, workout_type,
                          description, target_distance_km, target_duration_min,
                          intensity, phase, is_assessment, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         week_start,
@@ -127,7 +126,7 @@ def get_current_workout_plan() -> str:
                        target_distance_km, target_duration_min, intensity,
                        phase, is_assessment, notes, status
                 FROM planned_workouts
-                WHERE week_start = ? AND deleted_at IS NULL
+                WHERE week_start = %s AND deleted_at IS NULL
                 ORDER BY day_date, session_order
                 """,
                 (week_start,),
@@ -140,7 +139,7 @@ def get_current_workout_plan() -> str:
                            target_distance_km, target_duration_min, intensity,
                            phase, is_assessment, notes, status
                     FROM planned_workouts
-                    WHERE week_start > ? AND deleted_at IS NULL
+                    WHERE week_start > %s AND deleted_at IS NULL
                     ORDER BY week_start, day_date, session_order
                     LIMIT 7
                     """,
@@ -185,10 +184,9 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: list[DaySessio
     """
     try:
         with db_rw() as con:
-            con.execute("BEGIN")
             con.execute(
-                "UPDATE planned_workouts SET deleted_at = strftime('%Y-%m-%d %H:%M:%S', 'now') "
-                "WHERE week_start = ? AND day_date = ? AND deleted_at IS NULL",
+                "UPDATE planned_workouts SET deleted_at = NOW() "
+                "WHERE week_start = %s AND day_date = %s AND deleted_at IS NULL",
                 (week_start, day_date),
             )
             for order, s in enumerate(sessions, start=1):
@@ -198,7 +196,7 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: list[DaySessio
                         (week_start, day_date, session_order, activity_type, workout_type,
                          description, target_distance_km, target_duration_min,
                          intensity, phase, is_assessment, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         week_start,
@@ -247,13 +245,13 @@ def update_planned_workout_status(
         with db_rw() as con:
             if week_start:
                 count = con.execute(
-                    "SELECT COUNT(*) FROM planned_workouts WHERE day_date = ? AND week_start = ?",
+                    "SELECT COUNT(*) FROM planned_workouts WHERE day_date = %s AND week_start = %s",
                     (day_date, week_start),
-                ).fetchone()[0]
+                ).fetchone()["count"]
             else:
                 count = con.execute(
-                    "SELECT COUNT(*) FROM planned_workouts WHERE day_date = ?", (day_date,)
-                ).fetchone()[0]
+                    "SELECT COUNT(*) FROM planned_workouts WHERE day_date = %s", (day_date,)
+                ).fetchone()["count"]
 
             if count == 0:
                 return f"No planned sessions found for {day_date}."
@@ -264,10 +262,10 @@ def update_planned_workout_status(
                 con.execute(
                     """
                     UPDATE planned_workouts
-                    SET status     = ?,
-                        notes      = CASE WHEN notes IS NULL THEN ? ELSE notes || ' | ' || ? END,
+                    SET status     = %s,
+                        notes      = CASE WHEN notes IS NULL THEN %s ELSE notes || ' | ' || %s END,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE day_date = ? AND week_start = ?
+                    WHERE day_date = %s AND week_start = %s
                     """,
                     (status, note_append, note_append, day_date, week_start),
                 )
@@ -275,10 +273,10 @@ def update_planned_workout_status(
                 con.execute(
                     """
                     UPDATE planned_workouts
-                    SET status     = ?,
-                        notes      = CASE WHEN notes IS NULL THEN ? ELSE notes || ' | ' || ? END,
+                    SET status     = %s,
+                        notes      = CASE WHEN notes IS NULL THEN %s ELSE notes || ' | ' || %s END,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE day_date = ?
+                    WHERE day_date = %s
                     """,
                     (status, note_append, note_append, day_date),
                 )

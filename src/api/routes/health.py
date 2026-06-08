@@ -1,6 +1,7 @@
 import asyncio
-import sqlite3
 from pathlib import Path
+
+import psycopg
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -26,9 +27,8 @@ async def readiness():
 
     try:
         def _ping_db():
-            con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-            con.execute("SELECT 1")
-            con.close()
+            with psycopg.connect(config.DATABASE_URL, autocommit=True) as con:
+                con.execute("SELECT 1")
 
         await asyncio.to_thread(_ping_db)
         checks["database"] = "ok"

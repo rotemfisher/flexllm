@@ -46,7 +46,7 @@ def get_nutrition_profile() -> str:
                 """
                 SELECT AVG(active_calories) as avg_active_cals
                 FROM daily_health
-                WHERE date >= date('now', '-7 days') AND active_calories IS NOT NULL
+                WHERE date >= CURRENT_DATE - INTERVAL '7 days' AND active_calories IS NOT NULL
                 """
             ).fetchone()
             avg_active_cals = round(activity["avg_active_cals"] or 0)

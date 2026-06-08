@@ -32,7 +32,7 @@ def get_progress_report(weeks: int = 8) -> str:
             weekly = con.execute(
                 """
                 SELECT
-                    strftime('%Y-W%W', start_date)           AS week,
+                    TO_CHAR(start_date::date, 'IYYY-"W"IW')  AS week,
                     MIN(substr(start_date, 1, 10))           AS week_from,
                     COUNT(*)                                 AS runs,
                     ROUND(SUM(distance_km), 1)               AS total_km,
@@ -41,7 +41,7 @@ def get_progress_report(weeks: int = 8) -> str:
                     ROUND(AVG(CAST(rpe AS REAL)), 1)         AS avg_rpe,
                     ROUND(SUM(training_stress_score), 0)     AS total_tss
                 FROM v_running_overview
-                WHERE start_date >= date('now', ?)
+                WHERE start_date >= CURRENT_DATE + %s::interval
                 GROUP BY week
                 ORDER BY week DESC
                 """,
@@ -64,7 +64,7 @@ def get_progress_report(weeks: int = 8) -> str:
                     COUNT(*)                                                        AS total,
                     SUM(CASE WHEN status IN ('active','recovering') THEN 1 ELSE 0 END) AS active_count
                 FROM injuries
-                WHERE onset_date >= date('now', ?)
+                WHERE onset_date >= CURRENT_DATE + %s::interval
                 """,
                 (f"-{weeks} weeks",),
             ).fetchone()

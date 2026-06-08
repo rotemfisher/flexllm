@@ -23,7 +23,6 @@ import asyncio
 import html
 import logging
 import re
-import sqlite3
 import threading
 
 import uvicorn
@@ -40,6 +39,9 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+import psycopg
+from psycopg.rows import dict_row
 
 from src.api.app import setup_logging
 from src.api.routes import health as health_routes
@@ -73,23 +75,19 @@ _AGENT_NODES = frozenset(
 OWNER_FILTER = filters.User(user_id=config.TELEGRAM_ALLOWED_USER_ID)
 
 # ── Schema migration (sync — runs before the event loop starts) ───────────────
+# Each statement is guarded so adding an existing column is a no-op.
 _MIGRATION_STMTS = [
-    "ALTER TABLE athlete_profile ADD COLUMN name TEXT",
-    "ALTER TABLE athlete_profile ADD COLUMN current_weight_kg REAL",
-    "ALTER TABLE athlete_profile ADD COLUMN medical_conditions TEXT",
-    "ALTER TABLE athlete_profile ADD COLUMN height_cm REAL",
-    "ALTER TABLE athlete_profile ADD COLUMN biological_sex TEXT",
-    "ALTER TABLE athlete_profile ADD COLUMN dietary_pref TEXT",
+    "ALTER TABLE athlete_profile ADD COLUMN IF NOT EXISTS name TEXT",
+    "ALTER TABLE athlete_profile ADD COLUMN IF NOT EXISTS current_weight_kg REAL",
+    "ALTER TABLE athlete_profile ADD COLUMN IF NOT EXISTS medical_conditions TEXT",
+    "ALTER TABLE athlete_profile ADD COLUMN IF NOT EXISTS height_cm REAL",
+    "ALTER TABLE athlete_profile ADD COLUMN IF NOT EXISTS biological_sex TEXT",
+    "ALTER TABLE athlete_profile ADD COLUMN IF NOT EXISTS dietary_pref TEXT",
 ]
 try:
-    _mig_con = sqlite3.connect(config.DB_PATH)
-    for _stmt in _MIGRATION_STMTS:
-        try:
+    with psycopg.connect(config.DATABASE_URL) as _mig_con:
+        for _stmt in _MIGRATION_STMTS:
             _mig_con.execute(_stmt)
-        except sqlite3.OperationalError:
-            pass  # column already exists
-    _mig_con.commit()
-    _mig_con.close()
 except Exception as _exc:
     logger.warning("Schema migration: %s", _exc)
 
@@ -98,30 +96,27 @@ except Exception as _exc:
 
 def _onboarding_complete_sync() -> bool:
     try:
-        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
-        row = con.execute(
-            "SELECT onboarding_complete FROM athlete_profile ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        con.close()
-        return bool(row and row[0] == 1)
+        with psycopg.connect(config.DATABASE_URL, row_factory=dict_row, autocommit=True) as con:
+            row = con.execute(
+                "SELECT onboarding_complete FROM athlete_profile ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return bool(row and row["onboarding_complete"] == 1)
     except Exception:
         return False
 
 
 def _save_profile_sync(*, name, dob, height, sex, weight, goal, fitness_level, diet, medical) -> None:
-    con = sqlite3.connect(config.DB_PATH)
-    con.execute(
-        """
-        INSERT INTO athlete_profile
-            (name, date_of_birth, height_cm, biological_sex, current_goal, fitness_level,
-             current_weight_kg, dietary_pref, medical_conditions, onboarding_complete,
-             updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%d %H:%M:%S', 'now'))
-        """,
-        (name, dob, height, sex, goal, fitness_level, weight, diet, medical),
-    )
-    con.commit()
-    con.close()
+    with psycopg.connect(config.DATABASE_URL) as con:
+        con.execute(
+            """
+            INSERT INTO athlete_profile
+                (name, date_of_birth, height_cm, biological_sex, current_goal, fitness_level,
+                 current_weight_kg, dietary_pref, medical_conditions, onboarding_complete,
+                 updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, NOW())
+            """,
+            (name, dob, height, sex, goal, fitness_level, weight, diet, medical),
+        )
 
 
 # ── Telegram formatting helpers ───────────────────────────────────────────────

@@ -4,7 +4,7 @@ import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -24,7 +24,7 @@ from src.agent.prompts import (
     build_dietitian_prompt,
     build_psychologist_prompt,
 )
-from src.agent.router import route_entry
+from src.agent.router import make_supervisor_node
 
 # Names of the five handoff tools — used by the conflict resolver.
 _HANDOFF_TOOL_NAMES = frozenset({
@@ -833,8 +833,27 @@ def _should_continue(tools_node_name: str):
         last = state["messages"][-1]
         if getattr(last, "tool_calls", None):
             return tools_node_name
+        if state.get("pending_agents"):
+            return "route_pending"
         return END
     return router
+
+
+def _route_pending(state: CoachState) -> dict:
+    """Pop the first queued agent and promote it to active."""
+    pending = list(state.get("pending_agents") or [])
+    if not pending:
+        return {}
+    next_agent = pending[0]
+    return {
+        "active_agent": next_agent,
+        "pending_agents": pending[1:],
+        "handoff_reason": None,
+    }
+
+
+def _route_from_pending(state: CoachState) -> str:
+    return state["active_agent"]
 
 
 # ── Tool error formatter ──────────────────────────────────────────────────────
@@ -906,6 +925,18 @@ async def build_multi_agent_graph():
     else:
         query_llm = llm
 
+    # Supervisor LLM: small context, JSON mode, used only for intent routing at
+    # the start of each new session (not called for mid-session messages).
+    supervisor_llm = ChatOllama(
+        model=config.QUERY_MODEL_ID or config.MODEL_ID,
+        temperature=0,
+        format="json",
+        base_url=config.OLLAMA_BASE_URL,
+        num_ctx=1024,
+        request_timeout=20,
+    )
+    logger.info("Supervisor model: %s", config.QUERY_MODEL_ID or config.MODEL_ID)
+
     trainer_llm      = llm.bind_tools(TRAINER_TOOLS)
     physio_llm       = llm.bind_tools(PHYSIO_TOOLS)
     recovery_llm     = llm.bind_tools(RECOVERY_TOOLS)
@@ -914,31 +945,40 @@ async def build_multi_agent_graph():
 
     graph = StateGraph(CoachState)
 
-    # Context pre-fetch nodes — each runs before its agent to avoid read-only tool calls
+    # ── Supervisor ────────────────────────────────────────────────────────────
+    # Detects multi-intent on the first message of a session; no-op mid-session.
+    graph.add_node("supervisor", make_supervisor_node(supervisor_llm))
+
+    # ── Context pre-fetch nodes ───────────────────────────────────────────────
     graph.add_node("gather_trainer_context",     _gather_trainer_context)
     graph.add_node("gather_dietitian_context",   _gather_dietitian_context)
     graph.add_node("gather_physio_context",      _gather_physio_context)
     graph.add_node("gather_recovery_context",    _gather_recovery_context)
     graph.add_node("gather_psychologist_context",_gather_psychologist_context)
 
-    # Agent nodes
+    # ── Agent nodes ───────────────────────────────────────────────────────────
     graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt,      query_llm=query_llm))
     graph.add_node("physiotherapist", _make_agent_node(physio_llm,       build_physio_prompt,       query_llm=query_llm))
     graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,     build_recovery_prompt,     query_llm=query_llm))
     graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt,    query_llm=query_llm))
     graph.add_node("psychologist",    _make_agent_node(psychologist_llm, build_psychologist_prompt, query_llm=query_llm))
 
-    # Tool nodes — separate per agent so each only exposes its own tools.
-    # _format_tool_error turns Pydantic ValidationErrors into concise, model-readable
-    # messages that name the bad field and list the allowed literals.
+    # ── Tool nodes ────────────────────────────────────────────────────────────
     graph.add_node("trainer_tools",      ToolNode(TRAINER_TOOLS,      handle_tool_errors=_format_tool_error))
     graph.add_node("physio_tools",       ToolNode(PHYSIO_TOOLS,        handle_tool_errors=_format_tool_error))
     graph.add_node("recovery_tools",     ToolNode(RECOVERY_TOOLS,      handle_tool_errors=_format_tool_error))
     graph.add_node("dietitian_tools",    ToolNode(DIETITIAN_TOOLS,     handle_tool_errors=_format_tool_error))
     graph.add_node("psychologist_tools", ToolNode(PSYCHOLOGIST_TOOLS,  handle_tool_errors=_format_tool_error))
 
-    # Entry: semantic router at START — all agents go through their gather nodes first.
-    graph.add_conditional_edges(START, route_entry, {
+    # ── Pending-agent relay ───────────────────────────────────────────────────
+    # After a primary agent finishes, if the supervisor queued secondary agents,
+    # route_pending promotes the next one and routes to its gather node.
+    graph.add_node("route_pending", _route_pending)
+
+    # ── Entry edges ───────────────────────────────────────────────────────────
+    # START → supervisor → gather node (based on active_agent set by supervisor)
+    graph.add_edge(START, "supervisor")
+    graph.add_conditional_edges("supervisor", lambda s: s["active_agent"], {
         "trainer":         "gather_trainer_context",
         "physiotherapist": "gather_physio_context",
         "recovery_coach":  "gather_recovery_context",
@@ -951,27 +991,17 @@ async def build_multi_agent_graph():
     graph.add_edge("gather_recovery_context",     "recovery_coach")
     graph.add_edge("gather_psychologist_context", "psychologist")
 
-    # Each agent routes to its tool node or END
-    graph.add_conditional_edges(
-        "trainer", _should_continue("trainer_tools"),
-        {"trainer_tools": "trainer_tools", END: END},
-    )
-    graph.add_conditional_edges(
-        "physiotherapist", _should_continue("physio_tools"),
-        {"physio_tools": "physio_tools", END: END},
-    )
-    graph.add_conditional_edges(
-        "recovery_coach", _should_continue("recovery_tools"),
-        {"recovery_tools": "recovery_tools", END: END},
-    )
-    graph.add_conditional_edges(
-        "dietitian", _should_continue("dietitian_tools"),
-        {"dietitian_tools": "dietitian_tools", END: END},
-    )
-    graph.add_conditional_edges(
-        "psychologist", _should_continue("psychologist_tools"),
-        {"psychologist_tools": "psychologist_tools", END: END},
-    )
+    # Each agent routes to its tool node, the pending relay, or END.
+    _agent_edges = {"trainer_tools": "trainer_tools", "route_pending": "route_pending", END: END}
+    graph.add_conditional_edges("trainer",         _should_continue("trainer_tools"),      _agent_edges)
+    _agent_edges = {"physio_tools": "physio_tools", "route_pending": "route_pending", END: END}
+    graph.add_conditional_edges("physiotherapist", _should_continue("physio_tools"),       _agent_edges)
+    _agent_edges = {"recovery_tools": "recovery_tools", "route_pending": "route_pending", END: END}
+    graph.add_conditional_edges("recovery_coach",  _should_continue("recovery_tools"),     _agent_edges)
+    _agent_edges = {"dietitian_tools": "dietitian_tools", "route_pending": "route_pending", END: END}
+    graph.add_conditional_edges("dietitian",       _should_continue("dietitian_tools"),    _agent_edges)
+    _agent_edges = {"psychologist_tools": "psychologist_tools", "route_pending": "route_pending", END: END}
+    graph.add_conditional_edges("psychologist",    _should_continue("psychologist_tools"), _agent_edges)
 
     # Normal tool calls loop back to their owning agent.
     # When a handoff tool returns Command(goto=...), LangGraph overrides these edges.
@@ -981,6 +1011,14 @@ async def build_multi_agent_graph():
     graph.add_edge("dietitian_tools",    "dietitian")
     graph.add_edge("psychologist_tools", "psychologist")
 
-    checkpoint_db = config.DB_PATH.parent / "checkpoints.db"
-    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_db)) as checkpointer:
+    # route_pending promotes the next queued agent and routes to its gather node.
+    graph.add_conditional_edges("route_pending", _route_from_pending, {
+        "trainer":         "gather_trainer_context",
+        "physiotherapist": "gather_physio_context",
+        "recovery_coach":  "gather_recovery_context",
+        "dietitian":       "gather_dietitian_context",
+        "psychologist":    "gather_psychologist_context",
+    })
+
+    async with await AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
         yield graph.compile(checkpointer=checkpointer)
