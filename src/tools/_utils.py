@@ -24,7 +24,8 @@ def db_ro() -> Generator[sqlite3.Connection, None, None]:
 @contextmanager
 def db_rw() -> Generator[sqlite3.Connection, None, None]:
     """Read-write SQLite connection; rolls back on exception before closing."""
-    con = sqlite3.connect(config.DB_PATH)
+    con = sqlite3.connect(config.DB_PATH, timeout=10)
+    con.execute("PRAGMA journal_mode=WAL")
     try:
         yield con
     except Exception:

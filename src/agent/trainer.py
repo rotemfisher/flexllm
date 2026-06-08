@@ -1,5 +1,6 @@
 from src.tools import (
     get_onboarding_status,
+    get_daily_readiness,
     log_fitness_assessment,
     get_fitness_assessments,
     get_vdot_paces,
@@ -25,6 +26,7 @@ TRAINER_TOOLS = [
     check_upcoming_race_or_test,
     check_training_anomaly,
     # Core training tools
+    get_daily_readiness,
     get_onboarding_status,
     log_fitness_assessment,
     get_fitness_assessments,

@@ -12,15 +12,17 @@ Architecture notes:
   every MIN_EDIT_INTERVAL seconds. Telegram-specific errors (MessageNotModified,
   RetryAfter) are handled explicitly; other errors are logged rather than
   swallowed silently.
-- Parse modes: static bot messages use HTML (safe to include user-supplied text
-  via html.escape). LLM-generated streaming output uses Markdown with a plain-
-  text fallback because LLM output may contain unmatched Markdown tokens.
+- Parse modes: static bot messages use HTML. LLM streaming output is shown as
+  plain text (stripped of markdown symbols) during streaming, then converted to
+  Telegram HTML for the final edit. Long responses are split across multiple
+  messages at paragraph boundaries to stay within Telegram's 4096-char limit.
 - Health server: a minimal FastAPI app runs on port 8000 in a daemon thread so
   Docker's healthcheck and watcher's depends_on still work.
 """
 import asyncio
 import html
 import logging
+import re
 import sqlite3
 import threading
 
@@ -52,12 +54,15 @@ logger = logging.getLogger(__name__)
 (
     ONBOARDING_NAME,
     ONBOARDING_DOB,
+    ONBOARDING_HEIGHT,
+    ONBOARDING_SEX,
     ONBOARDING_WEIGHT,
     ONBOARDING_GOAL,
     ONBOARDING_LEVEL,
+    ONBOARDING_DIET,
     ONBOARDING_MEDICAL,
     CHAT,
-) = range(7)
+) = range(10)
 
 _AGENT_NODES = frozenset(
     {"trainer", "physiotherapist", "recovery_coach", "dietitian", "psychologist"}
@@ -72,6 +77,9 @@ _MIGRATION_STMTS = [
     "ALTER TABLE athlete_profile ADD COLUMN name TEXT",
     "ALTER TABLE athlete_profile ADD COLUMN current_weight_kg REAL",
     "ALTER TABLE athlete_profile ADD COLUMN medical_conditions TEXT",
+    "ALTER TABLE athlete_profile ADD COLUMN height_cm REAL",
+    "ALTER TABLE athlete_profile ADD COLUMN biological_sex TEXT",
+    "ALTER TABLE athlete_profile ADD COLUMN dietary_pref TEXT",
 ]
 try:
     _mig_con = sqlite3.connect(config.DB_PATH)
@@ -100,20 +108,158 @@ def _onboarding_complete_sync() -> bool:
         return False
 
 
-def _save_profile_sync(*, name, dob, weight, goal, fitness_level, medical) -> None:
+def _save_profile_sync(*, name, dob, height, sex, weight, goal, fitness_level, diet, medical) -> None:
     con = sqlite3.connect(config.DB_PATH)
     con.execute(
         """
         INSERT INTO athlete_profile
-            (name, date_of_birth, current_goal, fitness_level,
-             current_weight_kg, medical_conditions, onboarding_complete,
+            (name, date_of_birth, height_cm, biological_sex, current_goal, fitness_level,
+             current_weight_kg, dietary_pref, medical_conditions, onboarding_complete,
              updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%d %H:%M:%S', 'now'))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, strftime('%Y-%m-%d %H:%M:%S', 'now'))
         """,
-        (name, dob, goal, fitness_level, weight, medical),
+        (name, dob, height, sex, goal, fitness_level, weight, diet, medical),
     )
     con.commit()
     con.close()
+
+
+# ── Telegram formatting helpers ───────────────────────────────────────────────
+
+_TG_MAX_LEN = 3900  # Telegram hard limit is 4096; 3900 gives headroom for HTML tags
+
+
+def _quick_strip_md(text: str) -> str:
+    """Strip the most disruptive Markdown symbols for plain-text intermediate display.
+
+    Used during streaming so the user sees readable text instead of raw symbols
+    while the full response is still being generated.
+    """
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)  # ### headers
+    text = re.sub(r'\*{1,3}|_{1,2}', '', text)                  # * ** *** _ __
+    text = re.sub(r'^\s*\|[-:\s|]+\|\s*$', '', text, flags=re.MULTILINE)  # table separators
+    text = re.sub(r'\|', '  ', text)                             # table pipes
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)  # horizontal rules
+    text = re.sub(r'\\\[.+?\\\]', '', text, flags=re.DOTALL)    # LaTeX blocks
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _md_to_tg_html(text: str) -> str:
+    """Convert standard Markdown to Telegram-safe HTML.
+
+    Telegram HTML supports <b>, <i>, <code>, <pre>. Everything else
+    (headers, tables, LaTeX, horizontal rules) is converted to plain equivalents.
+    """
+    # 1. Protect fenced code blocks from HTML escaping
+    code_blocks: dict[str, str] = {}
+
+    def _save_fence(m: re.Match) -> str:
+        key = f"\x00F{len(code_blocks)}\x00"
+        code_blocks[key] = f"<pre>{html.escape(m.group(1))}</pre>"
+        return key
+
+    text = re.sub(r'```[^\n]*\n(.*?)```', _save_fence, text, flags=re.DOTALL)
+
+    # 2. Protect inline code
+    inline_codes: dict[str, str] = {}
+
+    def _save_inline(m: re.Match) -> str:
+        key = f"\x00I{len(inline_codes)}\x00"
+        inline_codes[key] = f"<code>{html.escape(m.group(1))}</code>"
+        return key
+
+    text = re.sub(r'`([^`\n]+)`', _save_inline, text)
+
+    # 3. HTML-escape everything outside the protected placeholders
+    parts = re.split(r'(\x00[FI]\d+\x00)', text)
+    text = ''.join(
+        p if re.fullmatch(r'\x00[FI]\d+\x00', p)
+        else p.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        for p in parts
+    )
+
+    # 4. Headers → bold (### Heading → <b>Heading</b>)
+    # Strip any **...** wrapping already present inside the heading to avoid <b><b>...</b></b>.
+    def _header_to_bold(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        inner = re.sub(r'\*\*([^\n]+?)\*\*', r'\1', inner)
+        return f"<b>{inner}</b>"
+
+    text = re.sub(r'^#{1,6}\s*(.+)$', _header_to_bold, text, flags=re.MULTILINE)
+
+    # 5. Tables: drop separator rows, convert pipes to spaces
+    text = re.sub(r'^\s*\|[-:\s|]+\|\s*$', '', text, flags=re.MULTILINE)
+
+    def _table_row(m: re.Match) -> str:
+        cells = [c.strip() for c in m.group(0).strip('| \n').split('|')]
+        return '  '.join(c for c in cells if c)
+
+    text = re.sub(r'^\|.+$', _table_row, text, flags=re.MULTILINE)
+
+    # 6. Bold: **text** or __text__
+    text = re.sub(r'\*\*([^\n]+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__([^\n]+?)__', r'<b>\1</b>', text)
+
+    # 7. Italic: *text* or _text_ (not crossing newlines)
+    text = re.sub(r'(?<!\w)\*([^\n*]+?)\*(?!\w)', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!\w)_([^\n_]+?)_(?!\w)', r'<i>\1</i>', text)
+
+    # 8. LaTeX math → plain text (strip delimiters, keep content)
+    text = re.sub(r'\\\[(.+?)\\\]', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.+?)\\\)', r'\1', text)
+
+    # 9. Horizontal rules → blank line
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+
+    # 10. Bullet list markers → •
+    text = re.sub(r'^[\-\*]\s+', '• ', text, flags=re.MULTILINE)
+
+    # 11. Restore protected code blocks
+    for k, v in {**code_blocks, **inline_codes}.items():
+        text = text.replace(k, v)
+
+    # 12. Collapse extra blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
+def _split_for_telegram(text: str, max_len: int = _TG_MAX_LEN) -> list[str]:
+    """Split text into chunks ≤ max_len chars, breaking at paragraph boundaries."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+
+    for para in re.split(r'\n{2,}', text):
+        if not para:
+            continue
+        sep = "\n\n" if current else ""
+        candidate = current + sep + para
+        if len(candidate) <= max_len:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            if len(para) > max_len:
+                for line in para.split('\n'):
+                    sep = "\n" if current else ""
+                    candidate = current + sep + line
+                    if len(candidate) <= max_len:
+                        current = candidate
+                    else:
+                        if current:
+                            chunks.append(current)
+                        current = line[:max_len]
+            else:
+                current = para
+
+    if current:
+        chunks.append(current)
+
+    return chunks or [text[:max_len]]
 
 
 # ── Graph helpers ─────────────────────────────────────────────────────────────
@@ -133,24 +279,72 @@ async def _stream_reply(
     context: ContextTypes.DEFAULT_TYPE,
     user_text: str,
 ) -> None:
-    """Stream the coach reply into a Telegram placeholder message.
+    """Stream the coach reply, sending each specialist's response as its own message.
 
-    Intermediate edits use plain text to avoid broken-Markdown errors mid-
-    stream. The final edit tries Markdown (LLM output style) with a plain-text
-    fallback. Telegram-specific errors are handled individually so real bugs
-    aren't silently swallowed.
+    Each agent (trainer, dietitian, …) gets a dedicated Telegram placeholder that
+    is updated during streaming and finalised as a properly-formatted HTML message
+    when that agent finishes.  Long single-agent responses are split at paragraph
+    boundaries to stay within Telegram's 4096-char limit.
     """
     chat_id = update.effective_chat.id
     athlete_ctx = context.chat_data.get("athlete_ctx", "")
     run_cfg = _run_config(chat_id)
     graph = context.application.bot_data["graph"]
 
+    # The very first placeholder is reused by the first agent that responds.
     placeholder = await update.effective_chat.send_message("⏳ Thinking…")
 
-    buffer = ""
+    agent_buf = ""
     current_agent: str | None = None
+    current_label: str | None = None
     last_edit_at = 0.0
-    MIN_EDIT_INTERVAL = 2.5  # seconds — well within Telegram's ~1 edit/s limit
+    MIN_EDIT_INTERVAL = 2.5
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    async def _send(text: str, *, edit_msg=None) -> None:
+        """Send or edit as HTML; fall back to stripped plain text on error."""
+        try:
+            if edit_msg:
+                await edit_msg.edit_text(text, parse_mode="HTML")
+            else:
+                await update.effective_chat.send_message(text, parse_mode="HTML")
+        except tg_error.BadRequest as e:
+            if "Message is not modified" not in str(e):
+                logger.warning("HTML send failed, retrying plain: %s", e)
+            plain = _quick_strip_md(text)[:_TG_MAX_LEN]
+            try:
+                if edit_msg:
+                    await edit_msg.edit_text(plain)
+                else:
+                    await update.effective_chat.send_message(plain)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning("Send failed: %s", e)
+
+    async def _flush() -> None:
+        """Convert current agent_buf to HTML and finalise the placeholder message.
+
+        If the converted text exceeds _TG_MAX_LEN, extra paragraphs are sent as
+        follow-up messages.  Resets `placeholder` to None when done.
+        """
+        nonlocal placeholder
+        if not agent_buf.strip():
+            try:
+                await placeholder.delete()
+            except Exception:
+                pass
+            placeholder = None
+            return
+        header = f"**[{current_label}]**\n" if current_label else ""
+        html_chunks = _split_for_telegram(_md_to_tg_html(header + agent_buf))
+        await _send(html_chunks[0], edit_msg=placeholder)
+        for extra in html_chunks[1:]:
+            await _send(extra)
+        placeholder = None
+
+    # ── stream ────────────────────────────────────────────────────────────────
 
     try:
         async for chunk, metadata in graph.astream(
@@ -161,18 +355,24 @@ async def _stream_reply(
             node = metadata.get("langgraph_node")
             if node in _AGENT_NODES and isinstance(chunk, AIMessageChunk):
                 if node != current_agent:
+                    # Finalise previous agent's message (if any)
                     if current_agent is not None:
-                        buffer += "\n\n"
-                    label = node.replace("_", " ").title()
-                    buffer += f"*[{label}]*\n"
-                    current_agent = node
-                if isinstance(chunk.content, str) and chunk.content:
-                    buffer += chunk.content
+                        await _flush()
+                        agent_buf = ""
+                        # Fresh placeholder for the incoming specialist
+                        placeholder = await update.effective_chat.send_message("⏳ Thinking…")
 
-                now = asyncio.get_event_loop().time()
-                if buffer and now - last_edit_at >= MIN_EDIT_INTERVAL:
+                    current_agent = node
+                    current_label = node.replace("_", " ").title()
+
+                if isinstance(chunk.content, str) and chunk.content:
+                    agent_buf += chunk.content
+
+                now = asyncio.get_running_loop().time()
+                if agent_buf and placeholder and now - last_edit_at >= MIN_EDIT_INTERVAL:
+                    preview = _quick_strip_md(f"**[{current_label}]**\n{agent_buf}")
                     try:
-                        await placeholder.edit_text(buffer + " ▌")
+                        await placeholder.edit_text(preview[:_TG_MAX_LEN] + " ▌")
                         last_edit_at = now
                     except tg_error.BadRequest as e:
                         if "Message is not modified" not in str(e):
@@ -182,30 +382,29 @@ async def _stream_reply(
                         await asyncio.sleep(e.retry_after)
                     except Exception as e:
                         logger.warning("Unexpected streaming error: %s", e)
+
+    except (GeneratorExit, asyncio.CancelledError):
+        if placeholder:
+            try:
+                await placeholder.delete()
+            except Exception:
+                pass
+        raise
     except Exception as e:
         logger.error("Graph execution failed: %s", e, exc_info=True)
-        await placeholder.edit_text("Sorry, something went wrong. Please try again.")
+        try:
+            await (placeholder.edit_text if placeholder else update.effective_chat.send_message)(
+                "Sorry, something went wrong. Please try again."
+            )
+        except Exception:
+            pass
         return
 
-    if not buffer:
-        buffer = "(No response from coach)"
-
-    # Final edit: LLM output is Markdown — try it, fall back to plain text.
-    try:
-        await placeholder.edit_text(buffer, parse_mode="Markdown")
-    except tg_error.BadRequest as e:
-        if "Message is not modified" not in str(e):
-            logger.warning("Final Markdown edit failed, retrying plain: %s", e)
-        try:
-            await placeholder.edit_text(buffer)
-        except Exception:
-            pass
-    except Exception as e:
-        logger.warning("Final edit failed: %s", e)
-        try:
-            await placeholder.edit_text(buffer)
-        except Exception:
-            pass
+    # Flush the last (or only) agent
+    if current_agent:
+        await _flush()
+    elif placeholder:
+        await placeholder.edit_text("(No response from coach)")
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -250,6 +449,37 @@ async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def onboarding_dob(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data["ob_dob"] = update.message.text.strip() or "1990-01-01"
     await update.message.reply_text(
+        "What is your height in centimetres?\n<i>(e.g. 175)</i>",
+        parse_mode="HTML",
+    )
+    return ONBOARDING_HEIGHT
+
+
+async def onboarding_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        height: float | None = float(update.message.text.strip())
+    except (ValueError, AttributeError):
+        height = None
+    context.chat_data["ob_height"] = height
+
+    keyboard = [
+        [InlineKeyboardButton("Male", callback_data="male")],
+        [InlineKeyboardButton("Female", callback_data="female")],
+        [InlineKeyboardButton("Other / prefer not to say", callback_data="other")],
+    ]
+    await update.message.reply_text(
+        "What is your biological sex? <i>(used only for calorie calculations)</i>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return ONBOARDING_SEX
+
+
+async def onboarding_sex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.chat_data["ob_sex"] = query.data
+    await query.edit_message_text(
         "What is your current weight in kilograms?\n<i>(e.g. 78.5)</i>",
         parse_mode="HTML",
     )
@@ -291,6 +521,24 @@ async def onboarding_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     context.chat_data["ob_level"] = query.data
+
+    keyboard = [
+        [InlineKeyboardButton("Omnivore (no restrictions)", callback_data="omnivore")],
+        [InlineKeyboardButton("Vegetarian", callback_data="vegetarian")],
+        [InlineKeyboardButton("Vegan", callback_data="vegan")],
+        [InlineKeyboardButton("Gluten-free", callback_data="gluten-free")],
+    ]
+    await query.edit_message_text(
+        "Do you follow any dietary preferences or restrictions?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return ONBOARDING_DIET
+
+
+async def onboarding_diet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.chat_data["ob_diet"] = query.data
     await query.edit_message_text(
         "Do you have any injuries, medical conditions, or physical limitations "
         "I should be aware of?\n(Reply <i>none</i> if nothing applies)",
@@ -310,9 +558,12 @@ async def onboarding_medical(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _save_profile_sync,
         name=cd["ob_name"],
         dob=cd["ob_dob"],
+        height=cd.get("ob_height"),
+        sex=cd.get("ob_sex"),
         weight=cd.get("ob_weight"),
         goal=cd["ob_goal"],
         fitness_level=cd["ob_level"],
+        diet=cd.get("ob_diet"),
         medical=medical,
     )
 
@@ -390,9 +641,12 @@ def main() -> None:
         states={
             ONBOARDING_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_name)],
             ONBOARDING_DOB:     [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_dob)],
+            ONBOARDING_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_height)],
+            ONBOARDING_SEX:     [CallbackQueryHandler(onboarding_sex)],
             ONBOARDING_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_weight)],
             ONBOARDING_GOAL:    [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_goal)],
             ONBOARDING_LEVEL:   [CallbackQueryHandler(onboarding_level)],
+            ONBOARDING_DIET:    [CallbackQueryHandler(onboarding_diet)],
             ONBOARDING_MEDICAL: [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_medical)],
             CHAT:               [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, chat_message)],
         },

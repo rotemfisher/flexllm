@@ -24,9 +24,23 @@ def get_nutrition_profile() -> str:
                 return "Athlete profile is missing. Ask the athlete for their age, height, sex, and nutrition goals."
 
             health = con.execute(
-                "SELECT body_mass_kg FROM daily_health WHERE body_mass_kg IS NOT NULL ORDER BY date DESC LIMIT 1"
+                "SELECT body_mass_kg, date FROM daily_health WHERE body_mass_kg IS NOT NULL ORDER BY date DESC LIMIT 1"
             ).fetchone()
-            current_weight = health["body_mass_kg"] if health else "Unknown"
+            profile_weight_row = con.execute(
+                "SELECT current_weight_kg, updated_at FROM athlete_profile WHERE current_weight_kg IS NOT NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+            # Use whichever source is more recent: daily_health or onboarding profile.
+            health_date = health["date"] if health else None
+            profile_date = (profile_weight_row["updated_at"] or "")[:10] if profile_weight_row else None
+            if health_date and profile_date and health_date >= profile_date:
+                current_weight = health["body_mass_kg"]
+            elif profile_weight_row:
+                current_weight = profile_weight_row["current_weight_kg"]
+            elif health:
+                current_weight = health["body_mass_kg"]
+            else:
+                current_weight = "Unknown"
 
             activity = con.execute(
                 """

@@ -1,6 +1,7 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 
 
@@ -8,6 +9,7 @@ from langgraph.types import Command
 def trainer_transfer(
     target: Literal["physiotherapist", "recovery_coach", "dietitian", "psychologist"],
     reason: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
     HANDOFF — transfer control from the Trainer to another specialist.
@@ -25,14 +27,21 @@ def trainer_transfer(
 
     reason — concise handoff note for the receiving agent (key values, clinical context).
     """
-    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
-
+    return Command(
+        goto=target,
+        update={
+            "active_agent": target,
+            "handoff_reason": reason,
+            "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
+        },
+    )
 
 
 @tool
 def physio_transfer(
     target: Literal["trainer", "recovery_coach", "dietitian", "psychologist"],
     reason: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
     HANDOFF — transfer control from the Physiotherapist to another specialist.
@@ -50,13 +59,21 @@ def physio_transfer(
 
     reason — handoff note with return-to-train restrictions or clinical context for the receiving agent.
     """
-    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
+    return Command(
+        goto=target,
+        update={
+            "active_agent": target,
+            "handoff_reason": reason,
+            "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
+        },
+    )
 
 
 @tool
 def recovery_transfer(
     target: Literal["trainer", "physiotherapist", "dietitian", "psychologist"],
     reason: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
     HANDOFF — transfer control from the Recovery Coach to another specialist.
@@ -74,13 +91,21 @@ def recovery_transfer(
 
     reason — handoff note with TSB, HRV, and sleep values plus clinical rationale.
     """
-    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
+    return Command(
+        goto=target,
+        update={
+            "active_agent": target,
+            "handoff_reason": reason,
+            "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
+        },
+    )
 
 
 @tool
 def dietitian_transfer(
     target: Literal["trainer", "physiotherapist", "recovery_coach", "psychologist"],
     reason: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
     HANDOFF — transfer control from the Dietitian to another specialist.
@@ -98,13 +123,21 @@ def dietitian_transfer(
 
     reason — handoff note with nutritional context and recommendations already provided.
     """
-    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
+    return Command(
+        goto=target,
+        update={
+            "active_agent": target,
+            "handoff_reason": reason,
+            "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
+        },
+    )
 
 
 @tool
 def psychologist_transfer(
     target: Literal["trainer", "physiotherapist", "recovery_coach", "dietitian"],
     reason: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
     """
     HANDOFF — transfer control from the Psychologist to another specialist.
@@ -122,4 +155,11 @@ def psychologist_transfer(
 
     reason — handoff note with psychological context and interventions already provided.
     """
-    return Command(goto=target, update={"active_agent": target, "handoff_reason": reason})
+    return Command(
+        goto=target,
+        update={
+            "active_agent": target,
+            "handoff_reason": reason,
+            "messages": [ToolMessage(f"Transferred to {target}. Reason: {reason}", tool_call_id=tool_call_id)],
+        },
+    )
