@@ -269,11 +269,15 @@ CREATE TABLE IF NOT EXISTS planned_workouts (
     status                 TEXT    NOT NULL DEFAULT 'planned'
                            CHECK (status IN ('planned', 'completed', 'skipped', 'modified')),
     created_at             TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
-    updated_at             TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+    updated_at             TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+    deleted_at             TEXT                     -- NULL = active; ISO timestamp = soft-deleted
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_planned_workouts_day_order
-    ON planned_workouts(week_start, day_date, session_order);
+-- Partial unique index: only enforced on active (non-deleted) rows so the same
+-- week/day/order slot can be reused after a soft-delete + re-insert.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_planned_workouts_active_day_order
+    ON planned_workouts(week_start, day_date, session_order)
+    WHERE deleted_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_planned_workouts_week
     ON planned_workouts(week_start);

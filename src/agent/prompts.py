@@ -2,6 +2,30 @@
 Per-agent system prompts for the FlexLLM multi-agent coaching system.
 Each builder takes an athlete_context string and returns the full system prompt.
 """
+from datetime import datetime, timedelta, timezone
+
+
+def _date_context() -> str:
+    """Return a short date block injected fresh into every system prompt.
+
+    Prevents LLMs from guessing 'today' or computing wrong week_start values
+    when the athlete asks for 'this week's plan' or 'next Tuesday'.
+    """
+    now        = datetime.now(timezone.utc)
+    weekday    = now.strftime("%A")
+    today      = now.strftime("%Y-%m-%d")
+    # Israeli convention: week starts Sunday. weekday(): Mon=0 … Sat=5, Sun=6
+    days_since = (now.weekday() + 1) % 7
+    week_start = (now - timedelta(days=days_since)).strftime("%Y-%m-%d")
+    next_sun   = (now + timedelta(days=(7 - days_since) % 7 or 7)).strftime("%Y-%m-%d")
+    return (
+        f"\n\nCURRENT DATE (injected at session start — use for all date calculations):\n"
+        f"  TODAY:               {weekday}, {today}\n"
+        f"  CURRENT WEEK_START:  {week_start}  (this Sunday)\n"
+        f"  NEXT WEEK_START:     {next_sun}  (next Sunday)\n"
+        f"  ⛔ Never guess dates. Use the exact values above when calling "
+        f"save_workout_plan, replace_day_in_plan, or any date-based tool."
+    )
 
 _BEHAVIOUR = """
 BEHAVIOUR:
@@ -196,7 +220,7 @@ HANDOFF TRIGGERS:
 
 
 def build_trainer_prompt(athlete_context: str) -> str:
-    return _TRAINER_STATIC + _BEHAVIOUR + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
+    return _TRAINER_STATIC + _BEHAVIOUR + _date_context() + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
 
 
 # ── PHYSIOTHERAPIST ───────────────────────────────────────────────────────────
@@ -257,7 +281,7 @@ HANDOFF TRIGGERS:
 
 
 def build_physio_prompt(athlete_context: str) -> str:
-    return _PHYSIO_STATIC + _BEHAVIOUR + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
+    return _PHYSIO_STATIC + _BEHAVIOUR + _date_context() + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
 
 
 # ── RECOVERY COACH ────────────────────────────────────────────────────────────
@@ -301,7 +325,7 @@ HANDOFF TRIGGERS:
 
 
 def build_recovery_prompt(athlete_context: str) -> str:
-    return _RECOVERY_STATIC + _BEHAVIOUR + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
+    return _RECOVERY_STATIC + _BEHAVIOUR + _date_context() + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
 
 
 # ── DIETITIAN ─────────────────────────────────────────────────────────────────
@@ -363,7 +387,7 @@ HANDOFF TRIGGERS:
 
 
 def build_dietitian_prompt(athlete_context: str) -> str:
-    return _DIETITIAN_STATIC + _BEHAVIOUR + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
+    return _DIETITIAN_STATIC + _BEHAVIOUR + _date_context() + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
 
 
 # ── PSYCHOLOGIST ──────────────────────────────────────────────────────────────
@@ -441,4 +465,4 @@ HANDOFF TRIGGERS:
 
 
 def build_psychologist_prompt(athlete_context: str) -> str:
-    return _PSYCHOLOGIST_STATIC + _BEHAVIOUR + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"
+    return _PSYCHOLOGIST_STATIC + _BEHAVIOUR + _date_context() + f"\n\n--- CURRENT ATHLETE CONTEXT ---\n{athlete_context}"

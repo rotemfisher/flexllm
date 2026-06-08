@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 import re
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -445,6 +445,64 @@ def _resolve_tool_conflicts(response) -> object:
     return response.model_copy(update={"tool_calls": writes + handoffs[:1]})
 
 
+# ── Conversation summarization ────────────────────────────────────────────────
+
+_SUMMARIZE_EVERY_N_TURNS = 8   # prune + summarise after every N human messages
+_KEEP_RECENT_TOOL_MSGS   = 10  # keep this many recent ToolMessages intact
+
+
+def _maybe_summarize(
+    llm,
+    full_messages: list[BaseMessage],
+) -> tuple[list[BaseMessage], str]:
+    """Identify stale ToolMessages (and their paired AIMessages) for pruning.
+
+    Returns (messages_to_remove, summary_text).  The caller decides whether this
+    turn qualifies for summarisation and only calls this function when it does.
+    Returns ([], "") on LLM error so the main flow is never blocked.
+    """
+    all_tool_msgs = [m for m in full_messages if isinstance(m, ToolMessage)]
+    stale_tools   = all_tool_msgs[:-_KEEP_RECENT_TOOL_MSGS]
+    if not stale_tools:
+        return [], ""
+
+    # Collect AIMessages whose *entire* tool-call set maps to stale ToolMessages.
+    stale_tc_ids = {getattr(m, "tool_call_id", None) for m in stale_tools}
+    stale_ais = [
+        m for m in full_messages
+        if isinstance(m, AIMessage)
+        and (getattr(m, "tool_calls", None) or [])
+        and {tc.get("id") for tc in (getattr(m, "tool_calls", None) or [])}.issubset(stale_tc_ids)
+    ]
+
+    context = "\n\n".join(
+        f"[{getattr(m, 'name', 'tool')}]\n{str(m.content)[:500]}"
+        for m in stale_tools
+    )
+    try:
+        resp = llm.invoke([
+            SystemMessage(content=(
+                "You are a concise data summariser for a sports-coaching AI. "
+                "Below are tool results from older conversation turns. "
+                "Write 4–8 bullet points covering the key athlete metrics, recent training, "
+                "injuries, and coaching decisions made so far. "
+                "Output ONLY the bullet list — no headers, no intro, no tool calls."
+            )),
+            HumanMessage(content=f"Summarise these tool results:\n\n{context}"),
+        ])
+        summary = resp.content.strip() if isinstance(resp.content, str) else ""
+    except Exception:
+        logger.warning("Conversation summarisation LLM call failed — skipping prune")
+        return [], ""
+
+    to_remove = stale_tools + stale_ais
+    logger.info(
+        "Summarised %d tool msgs and %d AI msgs at turn boundary",
+        len(stale_tools), len(stale_ais),
+    )
+    return to_remove, summary
+
+
 # ── Agent node factory ────────────────────────────────────────────────────────
 
 def _make_agent_node(llm_with_tools, prompt_builder,
@@ -469,7 +527,41 @@ def _make_agent_node(llm_with_tools, prompt_builder,
         prefetched = state.get("prefetched_context", "")
         if prefetched:
             system_prompt += prefetched
+
+        # ── Conversation summarisation ────────────────────────────────────────
+        # Count human messages in the full (untruncated) state to detect turn boundaries.
+        full_messages  = list(state["messages"])
+        n_human        = sum(1 for m in full_messages if isinstance(m, HumanMessage))
+        last_full_msg  = full_messages[-1] if full_messages else None
+        _should_summarise = (
+            isinstance(last_full_msg, HumanMessage)
+            and n_human > 0
+            and n_human % _SUMMARIZE_EVERY_N_TURNS == 0
+        )
+        msgs_to_remove: list[BaseMessage] = []
+        new_summary    = ""
+        if _should_summarise:
+            msgs_to_remove, new_summary = _maybe_summarize(llm_with_tools, full_messages)
+
+        removed_ids = {m.id for m in msgs_to_remove if m.id}
+
         history = _trim_messages(list(state["messages"]))
+        # Strip pruned messages from the window sent to the LLM this turn
+        if removed_ids:
+            history = [m for m in history if m.id not in removed_ids]
+
+        # Inject existing rolling summary when non-empty
+        existing_summary = state.get("conversation_summary", "")
+        if existing_summary:
+            system_prompt += (
+                "\n\n=== PRIOR CONVERSATION SUMMARY (compressed older turns) ===\n"
+                + existing_summary
+                + "\n=== END SUMMARY ===\n"
+                "(The above replaces older tool results that have been compressed out "
+                "of the message history to save context.)"
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         reason = state.get("handoff_reason")
         if reason:
             system_prompt += f"\n\nCRITICAL CONTEXT: You have just received control of the session. The previous agent's handoff note: '{reason}'"
@@ -724,7 +816,15 @@ def _make_agent_node(llm_with_tools, prompt_builder,
                     )
                 })
 
-        return {"messages": [response], "handoff_reason": None}
+        # Build the output message list: RemoveMessages first (state cleanup),
+        # then the actual LLM response.
+        out_messages = (
+            [RemoveMessage(id=m.id) for m in msgs_to_remove if m.id] + [response]
+        )
+        out: dict = {"messages": out_messages, "handoff_reason": None}
+        if new_summary:
+            out["conversation_summary"] = new_summary
+        return out
     return call_model
 
 

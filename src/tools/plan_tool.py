@@ -64,7 +64,13 @@ def save_workout_plan(week_start: str, sessions: list[WorkoutSession]) -> str:
     try:
         with db_rw() as con:
             con.execute("BEGIN")
-            con.execute("DELETE FROM planned_workouts WHERE week_start = ?", (week_start,))
+            # Soft-delete existing sessions for this week instead of hard-deleting,
+            # so an LLM hallucinating the wrong week_start never destroys history.
+            con.execute(
+                "UPDATE planned_workouts SET deleted_at = strftime('%Y-%m-%d %H:%M:%S', 'now') "
+                "WHERE week_start = ? AND deleted_at IS NULL",
+                (week_start,),
+            )
             for order, s in enumerate(sessions, start=1):
                 con.execute(
                     """
@@ -121,7 +127,7 @@ def get_current_workout_plan() -> str:
                        target_distance_km, target_duration_min, intensity,
                        phase, is_assessment, notes, status
                 FROM planned_workouts
-                WHERE week_start = ?
+                WHERE week_start = ? AND deleted_at IS NULL
                 ORDER BY day_date, session_order
                 """,
                 (week_start,),
@@ -134,7 +140,7 @@ def get_current_workout_plan() -> str:
                            target_distance_km, target_duration_min, intensity,
                            phase, is_assessment, notes, status
                     FROM planned_workouts
-                    WHERE week_start > ?
+                    WHERE week_start > ? AND deleted_at IS NULL
                     ORDER BY week_start, day_date, session_order
                     LIMIT 7
                     """,
@@ -181,7 +187,8 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: list[DaySessio
         with db_rw() as con:
             con.execute("BEGIN")
             con.execute(
-                "DELETE FROM planned_workouts WHERE week_start = ? AND day_date = ?",
+                "UPDATE planned_workouts SET deleted_at = strftime('%Y-%m-%d %H:%M:%S', 'now') "
+                "WHERE week_start = ? AND day_date = ? AND deleted_at IS NULL",
                 (week_start, day_date),
             )
             for order, s in enumerate(sessions, start=1):
