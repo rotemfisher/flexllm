@@ -34,16 +34,6 @@ _HANDOFF_TOOL_NAMES = frozenset({
     "psychologist_transfer",
 })
 
-# Tools the trainer MUST call on the very first response of every session.
-_TRAINER_STARTUP_TOOLS = frozenset({
-    "check_upcoming_race_or_test",
-    "get_onboarding_status",
-    "get_daily_readiness",
-    "get_current_workout_plan",
-    "get_recent_workouts",
-    "get_vdot_paces",   # required to have real pace zones before building any plan
-})
-
 # Tools the dietitian MUST call immediately on fresh-handoff activation (before any text).
 _DIETITIAN_HANDOFF_STARTUP_TOOLS = frozenset({
     "get_nutrition_profile",
@@ -68,6 +58,64 @@ _WRITE_WITH_HANDOFF = frozenset({
 # Enough to cover several back-and-forth exchanges while staying well within
 # Qwen 30B's NUM_CTX=16384 token budget.
 _MAX_HISTORY_MESSAGES = 30
+
+
+# ── Trainer context pre-fetch ─────────────────────────────────────────────────
+
+def _gather_trainer_context(state: CoachState) -> dict:
+    """Pre-fetch all trainer session-startup data at the Python level.
+
+    Runs before the trainer LLM call so the model receives fresh session data
+    as injected context instead of having to emit 6 parallel tool calls.
+    The VDOT is resolved from the latest fitness_assessments row; defaults to
+    35 (Daniels' beginner baseline) when no assessment exists yet.
+    """
+    from src.tools.sport_radar_tool import check_upcoming_race_or_test
+    from src.tools.assessment_tool import get_onboarding_status
+    from src.tools.readiness_tool import get_daily_readiness
+    from src.tools.plan_tool import get_current_workout_plan
+    from src.tools.workout_history_tool import get_recent_workouts
+    from src.tools.vdot_tool import get_vdot_paces
+    from src.tools._utils import db_ro
+
+    vdot = 35
+    try:
+        with db_ro() as con:
+            row = con.execute(
+                "SELECT estimated_vdot FROM fitness_assessments "
+                "WHERE estimated_vdot IS NOT NULL "
+                "ORDER BY assessment_date DESC LIMIT 1"
+            ).fetchone()
+            if row and row["estimated_vdot"]:
+                vdot = int(row["estimated_vdot"])
+    except Exception:
+        pass
+
+    startup_calls = [
+        ("check_upcoming_race_or_test", check_upcoming_race_or_test, {}),
+        ("get_onboarding_status",       get_onboarding_status,       {}),
+        ("get_daily_readiness",         get_daily_readiness,         {}),
+        ("get_current_workout_plan",    get_current_workout_plan,    {}),
+        ("get_recent_workouts",         get_recent_workouts,         {"limit": 10}),
+        ("get_vdot_paces",              get_vdot_paces,              {"vdot": vdot}),
+    ]
+
+    sections: list[str] = []
+    for name, fn, kwargs in startup_calls:
+        try:
+            result = fn.invoke(kwargs)
+        except Exception as exc:
+            result = f"(unavailable: {exc})"
+        sections.append(f"[{name}]\n{result}")
+
+    block = "\n\n".join(sections)
+    prefetched = (
+        f"\n\n=== SESSION STARTUP DATA (pre-fetched — do NOT call these tools again) ===\n"
+        f"{block}\n"
+        f"=== END SESSION STARTUP DATA ==="
+    )
+    logger.debug("gather_trainer_context: pre-fetched %d startup results (VDOT=%d)", len(startup_calls), vdot)
+    return {"prefetched_context": prefetched}
 
 
 # ── RAG auto-injection ────────────────────────────────────────────────────────
@@ -206,6 +254,9 @@ def _make_agent_node(llm_with_tools, prompt_builder,
 
         athlete_ctx = state.get("athlete_context", "")
         system_prompt = prompt_builder(athlete_ctx)
+        prefetched = state.get("prefetched_context", "")
+        if prefetched:
+            system_prompt += prefetched
         history = _trim_messages(list(state["messages"]))
         reason = state.get("handoff_reason")
         if reason:
@@ -442,8 +493,11 @@ async def build_multi_agent_graph():
 
     graph = StateGraph(CoachState)
 
+    # Pre-fetch node for the trainer — runs before the LLM to avoid 6 parallel tool calls
+    graph.add_node("gather_trainer_context", _gather_trainer_context)
+
     # Agent nodes
-    graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt, startup_tools=_TRAINER_STARTUP_TOOLS))
+    graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt))
     graph.add_node("physiotherapist", _make_agent_node(physio_llm,       build_physio_prompt))
     graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,     build_recovery_prompt))
     graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt, handoff_startup_tools=_DIETITIAN_HANDOFF_STARTUP_TOOLS))
@@ -457,13 +511,15 @@ async def build_multi_agent_graph():
     graph.add_node("psychologist_tools", ToolNode(PSYCHOLOGIST_TOOLS))
 
     # Entry: semantic router at START (embedding cosine similarity)
+    # Trainer path goes through the gather node first to pre-load session data.
     graph.add_conditional_edges(START, route_entry, {
-        "trainer":         "trainer",
+        "trainer":         "gather_trainer_context",
         "physiotherapist": "physiotherapist",
         "recovery_coach":  "recovery_coach",
         "dietitian":       "dietitian",
         "psychologist":    "psychologist",
     })
+    graph.add_edge("gather_trainer_context", "trainer")
 
     # Each agent routes to its tool node or END
     graph.add_conditional_edges(
