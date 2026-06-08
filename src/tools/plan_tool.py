@@ -1,70 +1,71 @@
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Literal, Optional
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 from src.tools._utils import db_ro, db_rw
 
 logger = logging.getLogger(__name__)
 
-# Allowed values for planned_workouts — deliberately narrower than the workouts
-# table because the planner only schedules these four types.
-_PLAN_ACTIVITY_TYPES = {"running", "strength", "rest", "cross_training"}
-_PLAN_WORKOUT_TYPES  = {
-    "easy", "tempo", "interval", "long_run", "recovery",
-    "strength", "rest", "assessment",
-}
+
+class WorkoutSession(BaseModel):
+    """One session inside a weekly training plan."""
+    day_date: str = Field(..., description="Session date in YYYY-MM-DD format")
+    activity_type: Literal["running", "strength", "rest", "cross_training"]
+    workout_type: Literal[
+        "easy", "tempo", "interval", "long_run", "recovery",
+        "strength", "rest", "assessment",
+    ]
+    description: str = Field(
+        ..., description="Full session description including exact target paces (min/km) or loads (kg)"
+    )
+    intensity: Literal["easy", "moderate", "hard", "rest"]
+    target_distance_km: Optional[float] = Field(None, description="Target distance in km (running sessions)")
+    target_duration_min: Optional[float] = Field(None, description="Target duration in minutes")
+    phase: Optional[Literal[
+        "onboarding", "base", "build", "peak", "race", "recovery", "return_to_run"
+    ]] = None
+    is_assessment: int = Field(0, description="1 for time trials or strength tests, 0 otherwise")
+    notes: Optional[str] = Field(None, description="Coach rationale or additional context")
+
+
+class DaySession(BaseModel):
+    """One session when replacing a single day (day_date is supplied at the tool level)."""
+    activity_type: Literal["running", "strength", "rest", "cross_training"]
+    workout_type: Literal[
+        "easy", "tempo", "interval", "long_run", "recovery",
+        "strength", "rest", "assessment",
+    ]
+    description: str = Field(
+        ..., description="Full session description including exact target paces (min/km) or loads (kg)"
+    )
+    intensity: Literal["easy", "moderate", "hard", "rest"]
+    target_distance_km: Optional[float] = None
+    target_duration_min: Optional[float] = None
+    phase: Optional[Literal[
+        "onboarding", "base", "build", "peak", "race", "recovery", "return_to_run"
+    ]] = None
+    is_assessment: int = Field(0, description="1 for time trials or strength tests, 0 otherwise")
+    notes: Optional[str] = None
 
 
 @tool
-def save_workout_plan(week_start: str, sessions: list[dict]) -> str:
+def save_workout_plan(week_start: str, sessions: list[WorkoutSession]) -> str:
     """
     Save a weekly training plan to the database. Replaces any existing plan for that week.
     Call this after generating a workout plan for the athlete.
 
     Args:
         week_start: The Sunday that starts the plan week in 'YYYY-MM-DD' format.
-        sessions: List of session objects. Each object must have:
-            Required:
-              - day_date (str, YYYY-MM-DD)
-              - activity_type (str: 'running' | 'strength' | 'rest' | 'cross_training')
-              - workout_type (str: 'easy' | 'tempo' | 'interval' | 'long_run' | 'recovery' |
-                                   'strength' | 'rest' | 'assessment')
-              - description (str: full session description)
-              - intensity (str: 'easy' | 'moderate' | 'hard' | 'rest')
-            Optional:
-              - target_distance_km (float)
-              - target_duration_min (float)
-              - phase (str: 'onboarding'|'base'|'build'|'peak'|'race'|'recovery'|'return_to_run')
-              - is_assessment (int: 1 for progress test / physical exam sessions, else 0)
-              - notes (str: coach rationale)
+        sessions: List of WorkoutSession objects — each field is strictly typed (see schema).
     """
-    plan = sessions
-
-    required = {"day_date", "activity_type", "workout_type", "description", "intensity"}
-    for i, s in enumerate(plan):
-        missing = required - s.keys()
-        if missing:
-            return f"Error: session {i} is missing required fields: {sorted(missing)}"
-
-        if s["activity_type"] not in _PLAN_ACTIVITY_TYPES:
-            return (
-                f"Error: session {i} has unknown activity_type '{s['activity_type']}'. "
-                f"Must be one of: {sorted(_PLAN_ACTIVITY_TYPES)}"
-            )
-
-        if s["workout_type"] not in _PLAN_WORKOUT_TYPES:
-            return (
-                f"Error: session {i} has unknown workout_type '{s['workout_type']}'. "
-                f"Must be one of: {sorted(_PLAN_WORKOUT_TYPES)}"
-            )
-
     try:
         with db_rw() as con:
-            # Explicit transaction: DELETE + INSERT must be atomic.
             con.execute("BEGIN")
             con.execute("DELETE FROM planned_workouts WHERE week_start = ?", (week_start,))
-            for order, s in enumerate(plan, start=1):
+            for order, s in enumerate(sessions, start=1):
                 con.execute(
                     """
                     INSERT INTO planned_workouts
@@ -75,22 +76,22 @@ def save_workout_plan(week_start: str, sessions: list[dict]) -> str:
                     """,
                     (
                         week_start,
-                        s["day_date"],
-                        s.get("session_order", order),
-                        s["activity_type"],
-                        s["workout_type"],
-                        s["description"],
-                        s.get("target_distance_km"),
-                        s.get("target_duration_min"),
-                        s["intensity"],
-                        s.get("phase"),
-                        int(s.get("is_assessment", 0)),
-                        s.get("notes"),
+                        s.day_date,
+                        order,
+                        s.activity_type,
+                        s.workout_type,
+                        s.description,
+                        s.target_distance_km,
+                        s.target_duration_min,
+                        s.intensity,
+                        s.phase,
+                        s.is_assessment,
+                        s.notes,
                     ),
                 )
             con.commit()
-        assessment_count = sum(1 for s in plan if s.get("is_assessment"))
-        summary = f"Saved {len(plan)} sessions for the week of {week_start}."
+        assessment_count = sum(1 for s in sessions if s.is_assessment)
+        summary = f"Saved {len(sessions)} sessions for the week of {week_start}."
         if assessment_count:
             summary += f" ({assessment_count} assessment session(s) included.)"
         return summary
@@ -165,7 +166,7 @@ def get_current_workout_plan() -> str:
 
 
 @tool
-def replace_day_in_plan(week_start: str, day_date: str, sessions: list[dict]) -> str:
+def replace_day_in_plan(week_start: str, day_date: str, sessions: list[DaySession]) -> str:
     """
     Replace all sessions for a single day within an existing weekly plan.
     Use this to adjust, swap, or add a session for one day without
@@ -174,28 +175,8 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: list[dict]) ->
     Args:
         week_start: The Sunday that starts the plan week in 'YYYY-MM-DD' format.
         day_date: The specific day to update in 'YYYY-MM-DD' format.
-        sessions: List of session objects — same schema as save_workout_plan.
+        sessions: List of DaySession objects (day_date is supplied above, not per-session).
     """
-    plan = sessions
-
-    required = {"activity_type", "workout_type", "description", "intensity"}
-    for i, s in enumerate(plan):
-        missing = required - s.keys()
-        if missing:
-            return f"Error: session {i} is missing required fields: {sorted(missing)}"
-
-        if s["activity_type"] not in _PLAN_ACTIVITY_TYPES:
-            return (
-                f"Error: session {i} has unknown activity_type '{s['activity_type']}'. "
-                f"Must be one of: {sorted(_PLAN_ACTIVITY_TYPES)}"
-            )
-
-        if s["workout_type"] not in _PLAN_WORKOUT_TYPES:
-            return (
-                f"Error: session {i} has unknown workout_type '{s['workout_type']}'. "
-                f"Must be one of: {sorted(_PLAN_WORKOUT_TYPES)}"
-            )
-
     try:
         with db_rw() as con:
             con.execute("BEGIN")
@@ -203,7 +184,7 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: list[dict]) ->
                 "DELETE FROM planned_workouts WHERE week_start = ? AND day_date = ?",
                 (week_start, day_date),
             )
-            for order, s in enumerate(plan, start=1):
+            for order, s in enumerate(sessions, start=1):
                 con.execute(
                     """
                     INSERT INTO planned_workouts
@@ -215,20 +196,20 @@ def replace_day_in_plan(week_start: str, day_date: str, sessions: list[dict]) ->
                     (
                         week_start,
                         day_date,
-                        s.get("session_order", order),
-                        s["activity_type"],
-                        s["workout_type"],
-                        s["description"],
-                        s.get("target_distance_km"),
-                        s.get("target_duration_min"),
-                        s["intensity"],
-                        s.get("phase"),
-                        int(s.get("is_assessment", 0)),
-                        s.get("notes"),
+                        order,
+                        s.activity_type,
+                        s.workout_type,
+                        s.description,
+                        s.target_distance_km,
+                        s.target_duration_min,
+                        s.intensity,
+                        s.phase,
+                        s.is_assessment,
+                        s.notes,
                     ),
                 )
             con.commit()
-        return f"Updated {len(plan)} session(s) for {day_date} in the week of {week_start}."
+        return f"Updated {len(sessions)} session(s) for {day_date} in the week of {week_start}."
     except Exception as exc:
         logger.exception("Tool error: %s", exc)
         return f"Database error: {exc}"

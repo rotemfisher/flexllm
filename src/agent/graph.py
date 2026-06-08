@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
@@ -32,12 +33,6 @@ _HANDOFF_TOOL_NAMES = frozenset({
     "recovery_transfer",
     "dietitian_transfer",
     "psychologist_transfer",
-})
-
-# Tools the dietitian MUST call immediately on fresh-handoff activation (before any text).
-_DIETITIAN_HANDOFF_STARTUP_TOOLS = frozenset({
-    "get_nutrition_profile",
-    "get_daily_readiness",
 })
 
 # Write operations that MUST execute before a handoff — they are not read-loops
@@ -115,6 +110,106 @@ def _gather_trainer_context(state: CoachState) -> dict:
         f"=== END SESSION STARTUP DATA ==="
     )
     logger.debug("gather_trainer_context: pre-fetched %d startup results (VDOT=%d)", len(startup_calls), vdot)
+    return {"prefetched_context": prefetched}
+
+
+def _gather_dietitian_context(state: CoachState) -> dict:
+    from src.tools.nutrition_tool import get_nutrition_profile
+    from src.tools.readiness_tool import get_daily_readiness
+
+    calls = [
+        ("get_nutrition_profile", get_nutrition_profile, {}),
+        ("get_daily_readiness",   get_daily_readiness,   {}),
+    ]
+    sections = []
+    for name, fn, kwargs in calls:
+        try:
+            result = fn.invoke(kwargs)
+        except Exception as exc:
+            result = f"(unavailable: {exc})"
+        sections.append(f"[{name}]\n{result}")
+
+    prefetched = (
+        "\n\n=== SESSION STARTUP DATA (pre-fetched — do NOT call these tools again) ===\n"
+        + "\n\n".join(sections)
+        + "\n=== END SESSION STARTUP DATA ==="
+    )
+    logger.debug("gather_dietitian_context: pre-fetched %d results", len(calls))
+    return {"prefetched_context": prefetched}
+
+
+def _gather_physio_context(state: CoachState) -> dict:
+    from src.tools.injury_tool import get_active_injuries
+    from src.tools.workout_history_tool import get_recent_workouts
+
+    calls = [
+        ("get_active_injuries", get_active_injuries, {}),
+        ("get_recent_workouts", get_recent_workouts, {"limit": 10}),
+    ]
+    sections = []
+    for name, fn, kwargs in calls:
+        try:
+            result = fn.invoke(kwargs)
+        except Exception as exc:
+            result = f"(unavailable: {exc})"
+        sections.append(f"[{name}]\n{result}")
+
+    prefetched = (
+        "\n\n=== SESSION STARTUP DATA (pre-fetched — do NOT call these tools again) ===\n"
+        + "\n\n".join(sections)
+        + "\n=== END SESSION STARTUP DATA ==="
+    )
+    logger.debug("gather_physio_context: pre-fetched %d results", len(calls))
+    return {"prefetched_context": prefetched}
+
+
+def _gather_recovery_context(state: CoachState) -> dict:
+    from src.tools.readiness_tool import get_daily_readiness
+    from src.tools.plan_tool import get_current_workout_plan
+
+    calls = [
+        ("get_daily_readiness",      get_daily_readiness,      {}),
+        ("get_current_workout_plan", get_current_workout_plan, {}),
+    ]
+    sections = []
+    for name, fn, kwargs in calls:
+        try:
+            result = fn.invoke(kwargs)
+        except Exception as exc:
+            result = f"(unavailable: {exc})"
+        sections.append(f"[{name}]\n{result}")
+
+    prefetched = (
+        "\n\n=== SESSION STARTUP DATA (pre-fetched — do NOT call these tools again) ===\n"
+        + "\n\n".join(sections)
+        + "\n=== END SESSION STARTUP DATA ==="
+    )
+    logger.debug("gather_recovery_context: pre-fetched %d results", len(calls))
+    return {"prefetched_context": prefetched}
+
+
+def _gather_psychologist_context(state: CoachState) -> dict:
+    from src.tools.readiness_tool import get_daily_readiness
+    from src.tools.workout_history_tool import get_recent_workouts
+
+    calls = [
+        ("get_daily_readiness", get_daily_readiness, {}),
+        ("get_recent_workouts", get_recent_workouts, {"limit": 10}),
+    ]
+    sections = []
+    for name, fn, kwargs in calls:
+        try:
+            result = fn.invoke(kwargs)
+        except Exception as exc:
+            result = f"(unavailable: {exc})"
+        sections.append(f"[{name}]\n{result}")
+
+    prefetched = (
+        "\n\n=== SESSION STARTUP DATA (pre-fetched — do NOT call these tools again) ===\n"
+        + "\n\n".join(sections)
+        + "\n=== END SESSION STARTUP DATA ==="
+    )
+    logger.debug("gather_psychologist_context: pre-fetched %d results", len(calls))
     return {"prefetched_context": prefetched}
 
 
@@ -222,7 +317,19 @@ def _rag_context_for(queries: list[str], n_per_query: int = 5) -> str:
             seen.add(key)
             sections.append(f"[search: {q}]\n{result}")
         if not sections:
-            return ""
+            # Searched but found nothing — inject a hard red-flag so the model
+            # cannot silently fall back to parametric knowledge.
+            logger.debug("RAG search returned no results for queries: %s", queries)
+            return (
+                "\n\n=== KNOWLEDGE BASE — NO RESULTS FOUND ===\n"
+                "⛔ The knowledge base returned NO relevant passages for this question.\n"
+                "You MUST NOT provide any professional recommendation, training prescription, "
+                "or nutrition advice. Respond with exactly:\n"
+                "'I don't currently have scientifically backed information on this topic in my "
+                "knowledge library. Please refocus your question or ask me to search for "
+                "additional sources.'\n"
+                "=== END KNOWLEDGE BASE ==="
+            )
         body = "\n\n---\n\n".join(sections)
         return (
             f"\n\n=== KNOWLEDGE BASE — research evidence (treat as primary source) ===\n"
@@ -234,6 +341,35 @@ def _rag_context_for(queries: list[str], n_per_query: int = 5) -> str:
     except Exception:
         logger.debug("RAG auto-inject skipped", exc_info=True)
     return ""
+
+
+# ── Output validator helpers ──────────────────────────────────────────────────
+
+_PROFESSIONAL_KEYWORDS = (
+    "pace", "km/h", "min/km", "calories", "kcal", "protein", "carbohydrate",
+    "sets", "reps", "intensity", "threshold", "interval", "zone ", "vdot",
+    "tss", "hrv", "periodiz", "training load", "volume", "recovery protocol",
+    "bmr", "tdee", "macro", "g/kg", "training plan", "rehabilitation",
+    "aerobic", "anaerobic", "lactate", "vo2", "heart rate zone",
+)
+
+# Matches parenthetical book/author citations: capital letter, letters/apostrophes/spaces,
+# at least 10 chars — catches "(Daniels' Running Formula)" but not "(RPE 8)" or "(e.g.)".
+_CITATION_RE = re.compile(r"\([A-Z][A-Za-z'\s]{9,60}\)")
+
+
+def _has_professional_content(text: str) -> bool:
+    """Return True when the response is long enough and contains professional claims."""
+    if len(text) < 180:
+        return False
+    text_lower = text.lower()
+    matches = sum(1 for kw in _PROFESSIONAL_KEYWORDS if kw in text_lower)
+    return matches >= 2
+
+
+def _has_valid_citations(text: str) -> bool:
+    """Return True when the response contains at least one (Book Title) citation."""
+    return bool(_CITATION_RE.search(text))
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -355,9 +491,9 @@ def _make_agent_node(llm_with_tools, prompt_builder,
         if is_fresh_handoff:
             messages = [SystemMessage(content=system_prompt)] + history + [
                 HumanMessage(content=(
-                    "You have just been activated. "
-                    "IMMEDIATELY call your required startup tools. "
-                    "Output ONLY the tool calls — no text whatsoever."
+                    "You have just been activated via handoff. "
+                    "Your session startup data has been pre-loaded in the SESSION STARTUP DATA block above — "
+                    "do NOT call startup tools again. Read the data and respond to the athlete now."
                 ))
             ]
         else:
@@ -500,6 +636,30 @@ def _make_agent_node(llm_with_tools, prompt_builder,
             response = _safe_invoke(nudge, "empty nudge")
             response = _resolve_tool_conflicts(response)
 
+        # Citation validator — runs last, after all other nudges are resolved.
+        # Only fires on final text responses (no tool calls) that contain professional
+        # content without any book-title citation in the (Title) format.
+        final_content = response.content if isinstance(response.content, str) else ""
+        final_has_tools = bool(getattr(response, "tool_calls", None))
+        if (
+            not final_has_tools
+            and _has_professional_content(final_content)
+            and not _has_valid_citations(final_content)
+        ):
+            logger.warning("Professional content without citations — triggering validator nudge")
+            citation_nudge = messages + [
+                response,
+                HumanMessage(content=(
+                    "You made professional recommendations without citing the knowledge base. "
+                    "Rewrite your entire response and add citations in the format "
+                    "(Book Title) after every professional claim (e.g. '(Daniels' Running Formula)'). "
+                    "If you cannot cite a passage from the injected KNOWLEDGE BASE for a claim, "
+                    "replace that claim with the strict abstention phrase instead of inventing a citation."
+                )),
+            ]
+            response = _safe_invoke(citation_nudge, "citation validator nudge")
+            response = _resolve_tool_conflicts(response)
+
         return {"messages": [response], "handoff_reason": None}
     return call_model
 
@@ -547,14 +707,18 @@ async def build_multi_agent_graph():
 
     graph = StateGraph(CoachState)
 
-    # Pre-fetch node for the trainer — runs before the LLM to avoid 6 parallel tool calls
-    graph.add_node("gather_trainer_context", _gather_trainer_context)
+    # Context pre-fetch nodes — each runs before its agent to avoid read-only tool calls
+    graph.add_node("gather_trainer_context",     _gather_trainer_context)
+    graph.add_node("gather_dietitian_context",   _gather_dietitian_context)
+    graph.add_node("gather_physio_context",      _gather_physio_context)
+    graph.add_node("gather_recovery_context",    _gather_recovery_context)
+    graph.add_node("gather_psychologist_context",_gather_psychologist_context)
 
     # Agent nodes
     graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt,      query_llm=query_llm))
     graph.add_node("physiotherapist", _make_agent_node(physio_llm,       build_physio_prompt,       query_llm=query_llm))
     graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,     build_recovery_prompt,     query_llm=query_llm))
-    graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt,    handoff_startup_tools=_DIETITIAN_HANDOFF_STARTUP_TOOLS, query_llm=query_llm))
+    graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt,    query_llm=query_llm))
     graph.add_node("psychologist",    _make_agent_node(psychologist_llm, build_psychologist_prompt, query_llm=query_llm))
 
     # Tool nodes — separate per agent so each only exposes its own tools
@@ -564,16 +728,19 @@ async def build_multi_agent_graph():
     graph.add_node("dietitian_tools",    ToolNode(DIETITIAN_TOOLS))
     graph.add_node("psychologist_tools", ToolNode(PSYCHOLOGIST_TOOLS))
 
-    # Entry: semantic router at START (embedding cosine similarity)
-    # Trainer path goes through the gather node first to pre-load session data.
+    # Entry: semantic router at START — all agents go through their gather nodes first.
     graph.add_conditional_edges(START, route_entry, {
         "trainer":         "gather_trainer_context",
-        "physiotherapist": "physiotherapist",
-        "recovery_coach":  "recovery_coach",
-        "dietitian":       "dietitian",
-        "psychologist":    "psychologist",
+        "physiotherapist": "gather_physio_context",
+        "recovery_coach":  "gather_recovery_context",
+        "dietitian":       "gather_dietitian_context",
+        "psychologist":    "gather_psychologist_context",
     })
-    graph.add_edge("gather_trainer_context", "trainer")
+    graph.add_edge("gather_trainer_context",      "trainer")
+    graph.add_edge("gather_dietitian_context",    "dietitian")
+    graph.add_edge("gather_physio_context",       "physiotherapist")
+    graph.add_edge("gather_recovery_context",     "recovery_coach")
+    graph.add_edge("gather_psychologist_context", "psychologist")
 
     # Each agent routes to its tool node or END
     graph.add_conditional_edges(

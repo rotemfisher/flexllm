@@ -4,6 +4,16 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 
+# Every handoff lands on the target's gather node so startup data is always
+# pre-loaded before the agent's first LLM call, regardless of activation path.
+_GATHER_NODE: dict[str, str] = {
+    "trainer":         "gather_trainer_context",
+    "physiotherapist": "gather_physio_context",
+    "recovery_coach":  "gather_recovery_context",
+    "dietitian":       "gather_dietitian_context",
+    "psychologist":    "gather_psychologist_context",
+}
+
 
 @tool
 def trainer_transfer(
@@ -28,7 +38,7 @@ def trainer_transfer(
     reason — concise handoff note for the receiving agent (key values, clinical context).
     """
     return Command(
-        goto=target,
+        goto=_GATHER_NODE[target],
         update={
             "active_agent": target,
             "handoff_reason": reason,
@@ -60,7 +70,7 @@ def physio_transfer(
     reason — handoff note with return-to-train restrictions or clinical context for the receiving agent.
     """
     return Command(
-        goto=target,
+        goto=_GATHER_NODE[target],
         update={
             "active_agent": target,
             "handoff_reason": reason,
@@ -92,7 +102,7 @@ def recovery_transfer(
     reason — handoff note with TSB, HRV, and sleep values plus clinical rationale.
     """
     return Command(
-        goto=target,
+        goto=_GATHER_NODE[target],
         update={
             "active_agent": target,
             "handoff_reason": reason,
@@ -124,7 +134,7 @@ def dietitian_transfer(
     reason — handoff note with nutritional context and recommendations already provided.
     """
     return Command(
-        goto=target,
+        goto=_GATHER_NODE[target],
         update={
             "active_agent": target,
             "handoff_reason": reason,
@@ -156,7 +166,7 @@ def psychologist_transfer(
     reason — handoff note with psychological context and interventions already provided.
     """
     return Command(
-        goto=target,
+        goto=_GATHER_NODE[target],
         update={
             "active_agent": target,
             "handoff_reason": reason,
