@@ -357,6 +357,23 @@ _PROFESSIONAL_KEYWORDS = (
 # at least 10 chars — catches "(Daniels' Running Formula)" but not "(RPE 8)" or "(e.g.)".
 _CITATION_RE = re.compile(r"\([A-Z][A-Za-z'\s]{9,60}\)")
 
+# Matches "[Book Title | Section]" or "[Book Title]" headers injected by _rag_context_for().
+_BOOK_TITLE_IN_CONTEXT_RE = re.compile(r"\[([^\|\]\n]+?)(?:\s*\|[^\]]+)?\]")
+
+_CITATION_STOP_WORDS = frozenset({
+    "the", "a", "an", "of", "and", "in", "for", "to", "by", "on", "at", "with",
+})
+
+
+def _extract_injected_titles(rag_ctx: str) -> set[str]:
+    """Return the set of book titles (lower-cased) present in a RAG context block."""
+    titles: set[str] = set()
+    for m in _BOOK_TITLE_IN_CONTEXT_RE.finditer(rag_ctx):
+        title = m.group(1).strip()
+        if not title.startswith("search:"):
+            titles.add(title.lower())
+    return titles
+
 
 def _has_professional_content(text: str) -> bool:
     """Return True when the response is long enough and contains professional claims."""
@@ -370,6 +387,25 @@ def _has_professional_content(text: str) -> bool:
 def _has_valid_citations(text: str) -> bool:
     """Return True when the response contains at least one (Book Title) citation."""
     return bool(_CITATION_RE.search(text))
+
+
+def _citations_are_grounded(text: str, injected_titles: set[str]) -> bool:
+    """Return True when at least one citation in *text* matches a book that was
+    actually injected from Qdrant this turn.
+
+    Falls back to pure regex when no RAG context was injected (so the validator
+    still fires on professional responses that should have triggered a search).
+    """
+    if not injected_titles:
+        return _has_valid_citations(text)
+    for m in _CITATION_RE.finditer(text):
+        cited = m.group(0)[1:-1].strip().lower()
+        cited_words = {w for w in cited.split() if w not in _CITATION_STOP_WORDS}
+        for title in injected_titles:
+            title_words = {w for w in title.split() if w not in _CITATION_STOP_WORDS}
+            if len(cited_words & title_words) >= 2:
+                return True
+    return False
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -458,12 +494,18 @@ def _make_agent_node(llm_with_tools, prompt_builder,
         )
 
         # ── Qdrant knowledge injection ────────────────────────────────────────
+        # Track which book titles were actually injected so the citation validator
+        # can reject hallucinated book names that were never in the Qdrant results.
+        injected_book_titles: set[str] = set()
+
         # Injection 1: first call of each user turn — targeted queries derived
         # from the athlete profile so the model starts with relevant book passages.
         if is_first_call and not is_fresh_handoff:
             if last_human:
                 rag_queries = _build_rag_queries(last_human_content, athlete_ctx, query_llm)
-                system_prompt += _rag_context_for(rag_queries)
+                rag_ctx = _rag_context_for(rag_queries)
+                system_prompt += rag_ctx
+                injected_book_titles |= _extract_injected_titles(rag_ctx)
 
         # Injection 2: call immediately after startup tools complete — this is
         # when the plan is actually written, so evidence must be in context here.
@@ -475,7 +517,9 @@ def _make_agent_node(llm_with_tools, prompt_builder,
                 for tc in (getattr(_last_ai, "tool_calls", None) or [])
             ):
                 rag_queries = _build_rag_queries(last_human_content, athlete_ctx, query_llm)
-                system_prompt += _rag_context_for(rag_queries)
+                rag_ctx = _rag_context_for(rag_queries)
+                system_prompt += rag_ctx
+                injected_book_titles |= _extract_injected_titles(rag_ctx)
         # ─────────────────────────────────────────────────────────────────────
 
         # On the very first call of a session (no tool results yet, not a handoff),
@@ -644,7 +688,7 @@ def _make_agent_node(llm_with_tools, prompt_builder,
         if (
             not final_has_tools
             and _has_professional_content(final_content)
-            and not _has_valid_citations(final_content)
+            and not _citations_are_grounded(final_content, injected_book_titles)
         ):
             logger.warning("Professional content without citations — triggering validator nudge")
             citation_nudge = messages + [
@@ -660,6 +704,26 @@ def _make_agent_node(llm_with_tools, prompt_builder,
             response = _safe_invoke(citation_nudge, "citation validator nudge")
             response = _resolve_tool_conflicts(response)
 
+            # Hard override: if the model still ignored the nudge, replace the
+            # response entirely rather than letting uncited professional advice reach
+            # the athlete.
+            post_nudge = response.content if isinstance(response.content, str) else ""
+            if (
+                not getattr(response, "tool_calls", None)
+                and _has_professional_content(post_nudge)
+                and not _citations_are_grounded(post_nudge, injected_book_titles)
+            ):
+                logger.warning("Citation nudge ignored — overriding with abstention message")
+                response = response.model_copy(update={
+                    "content": (
+                        "I want to make sure my recommendations are grounded in the coaching "
+                        "literature before I share them. Could you give me a bit more detail — "
+                        "for example your specific goal, current fitness level, or the exact "
+                        "topic you'd like help with? That helps me pull the right evidence "
+                        "from the knowledge base and give you a fully cited answer."
+                    )
+                })
+
         return {"messages": [response], "handoff_reason": None}
     return call_model
 
@@ -671,6 +735,49 @@ def _should_continue(tools_node_name: str):
             return tools_node_name
         return END
     return router
+
+
+# ── Tool error formatter ──────────────────────────────────────────────────────
+
+_PLAN_TOOL_ALLOWED: dict[str, str] = {
+    "activity_type": "'running', 'strength', 'rest', 'cross_training'",
+    "workout_type":  "'easy', 'tempo', 'interval', 'long_run', 'recovery', 'strength', 'rest', 'assessment'",
+    "intensity":     "'easy', 'moderate', 'hard', 'rest'",
+    "phase":         "'onboarding', 'base', 'build', 'peak', 'race', 'recovery', 'return_to_run' (or null)",
+}
+
+
+def _format_tool_error(error: Exception) -> str:
+    """Custom ToolNode error handler.
+
+    Rewrites Pydantic ValidationErrors into a short, model-readable message that
+    names the bad field, the received value, and the allowed literals.  All other
+    exceptions fall through to LangGraph's default handler so existing behaviour
+    is unchanged.
+    """
+    from langgraph.prebuilt.tool_node import ToolInvocationError, _default_handle_tool_errors
+    from pydantic import ValidationError as PydanticValidationError
+
+    if isinstance(error, ToolInvocationError) and isinstance(error.source, PydanticValidationError):
+        errors = error.filtered_errors or error.source.errors()
+        lines: list[str] = []
+        for e in errors[:5]:
+            loc  = " → ".join(str(p) for p in e.get("loc", ()))
+            msg  = e.get("msg", "invalid value")
+            inp  = e.get("input", "?")
+            lines.append(f"  • {loc}: {msg} (you sent: {inp!r})")
+        bad_fields = {str(e.get("loc", ("",))[-1]) for e in errors if e.get("loc")}
+        hint_lines = [
+            f"    {k}: {v}"
+            for k, v in _PLAN_TOOL_ALLOWED.items()
+            if k in bad_fields
+        ]
+        out = f"Tool '{error.tool_name}' validation error — fix and retry:\n" + "\n".join(lines)
+        if hint_lines:
+            out += "\nAllowed values:\n" + "\n".join(hint_lines)
+        return out
+
+    return _default_handle_tool_errors(error)
 
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -721,12 +828,14 @@ async def build_multi_agent_graph():
     graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt,    query_llm=query_llm))
     graph.add_node("psychologist",    _make_agent_node(psychologist_llm, build_psychologist_prompt, query_llm=query_llm))
 
-    # Tool nodes — separate per agent so each only exposes its own tools
-    graph.add_node("trainer_tools",      ToolNode(TRAINER_TOOLS))
-    graph.add_node("physio_tools",       ToolNode(PHYSIO_TOOLS))
-    graph.add_node("recovery_tools",     ToolNode(RECOVERY_TOOLS))
-    graph.add_node("dietitian_tools",    ToolNode(DIETITIAN_TOOLS))
-    graph.add_node("psychologist_tools", ToolNode(PSYCHOLOGIST_TOOLS))
+    # Tool nodes — separate per agent so each only exposes its own tools.
+    # _format_tool_error turns Pydantic ValidationErrors into concise, model-readable
+    # messages that name the bad field and list the allowed literals.
+    graph.add_node("trainer_tools",      ToolNode(TRAINER_TOOLS,      handle_tool_errors=_format_tool_error))
+    graph.add_node("physio_tools",       ToolNode(PHYSIO_TOOLS,        handle_tool_errors=_format_tool_error))
+    graph.add_node("recovery_tools",     ToolNode(RECOVERY_TOOLS,      handle_tool_errors=_format_tool_error))
+    graph.add_node("dietitian_tools",    ToolNode(DIETITIAN_TOOLS,     handle_tool_errors=_format_tool_error))
+    graph.add_node("psychologist_tools", ToolNode(PSYCHOLOGIST_TOOLS,  handle_tool_errors=_format_tool_error))
 
     # Entry: semantic router at START — all agents go through their gather nodes first.
     graph.add_conditional_edges(START, route_entry, {
