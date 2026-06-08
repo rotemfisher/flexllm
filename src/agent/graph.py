@@ -120,13 +120,8 @@ def _gather_trainer_context(state: CoachState) -> dict:
 
 # ── RAG auto-injection ────────────────────────────────────────────────────────
 
-def _build_rag_queries(human_message: str, athlete_context: str) -> list[str]:
-    """Derive 2–4 targeted Qdrant queries from the user message and athlete profile.
-
-    One generic query (the raw message) plus goal-specific queries derived from
-    the athlete context give the model directly relevant book passages instead of
-    generic results from a vague user sentence.
-    """
+def _keyword_rag_queries(human_message: str, athlete_context: str) -> list[str]:
+    """Keyword-based Qdrant query builder — used as a fallback when LLM generation fails."""
     ctx = athlete_context.lower()
     queries: list[str] = []
 
@@ -139,7 +134,6 @@ def _build_rag_queries(human_message: str, athlete_context: str) -> list[str]:
         "advanced"
     )
 
-    # Running goal
     if any(k in ctx for k in ["10k", "5k", "run", "marathon", "half marathon", "pace", "jog"]):
         dist = (
             "marathon" if "marathon" in ctx else
@@ -149,15 +143,60 @@ def _build_rag_queries(human_message: str, athlete_context: str) -> list[str]:
         )
         queries.append(f"{level} {dist} training periodization base phase aerobic development VDOT")
 
-    # Strength / body composition goal
     if any(k in ctx for k in ["muscle", "strength", "shredded", "hypertrophy", "muscular", "lean"]):
         queries.append(f"{level} hypertrophy strength training concurrent endurance periodization")
 
-    # Fat loss goal
     if any(k in ctx for k in ["fat", "shredded", "lean", "weight loss", "body comp"]):
         queries.append("concurrent training fat loss body composition performance nutrition")
 
     return queries[:4]
+
+
+def _build_rag_queries(human_message: str, athlete_context: str, query_llm=None) -> list[str]:
+    """Generate targeted Qdrant queries for the user message.
+
+    When a query_llm is provided the model rewrites the user message into up to
+    3 precise exercise-science search queries — far more accurate than keyword
+    matching.  Falls back to keyword extraction on any LLM error so RAG always
+    runs even if the query model is unavailable.
+    """
+    if not human_message.strip():
+        return []
+
+    if query_llm is not None:
+        try:
+            from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
+
+            system = (
+                "You are a search-query optimizer for a sports science knowledge base "
+                "(books: Daniels' Running Formula, NSCA Essentials, Sports Nutrition, etc.).\n"
+                "Given a user question and athlete profile, output EXACTLY 3 search queries, "
+                "one per line — no numbering, no bullets, no explanation.\n"
+                "Rules:\n"
+                "- Each query must be 6–15 words.\n"
+                "- Use technical exercise-science terminology.\n"
+                "- Target physiology, training methodology, or nutrition research.\n"
+                "- Queries must be diverse: capture the core concept plus two related angles."
+            )
+            user_prompt = (
+                f"Athlete profile (summary): {athlete_context[:300]}\n\n"
+                f"User question: {human_message}\n\n"
+                "Output 3 search queries:"
+            )
+            response = query_llm.invoke([_SM(content=system), _HM(content=user_prompt)])
+            raw_lines = response.content.strip().split("\n")
+            queries = [
+                line.lstrip("0123456789.-) \t").strip()
+                for line in raw_lines
+                if line.strip() and len(line.strip()) > 5
+            ][:3]
+            if queries:
+                logger.debug("LLM RAG queries: %s", queries)
+                return queries
+        except Exception:
+            logger.debug("LLM query generation failed — falling back to keywords", exc_info=True)
+
+    return _keyword_rag_queries(human_message, athlete_context)
 
 
 def _rag_context_for(queries: list[str], n_per_query: int = 5) -> str:
@@ -238,7 +277,8 @@ def _resolve_tool_conflicts(response) -> object:
 
 def _make_agent_node(llm_with_tools, prompt_builder,
                      startup_tools: frozenset = frozenset(),
-                     handoff_startup_tools: frozenset = frozenset()):
+                     handoff_startup_tools: frozenset = frozenset(),
+                     query_llm=None):
     def call_model(state: CoachState) -> dict:
         from langchain_core.messages import AIMessage as _AIMessage
 
@@ -286,7 +326,7 @@ def _make_agent_node(llm_with_tools, prompt_builder,
         # from the athlete profile so the model starts with relevant book passages.
         if is_first_call and not is_fresh_handoff:
             if last_human:
-                rag_queries = _build_rag_queries(last_human_content, athlete_ctx)
+                rag_queries = _build_rag_queries(last_human_content, athlete_ctx, query_llm)
                 system_prompt += _rag_context_for(rag_queries)
 
         # Injection 2: call immediately after startup tools complete — this is
@@ -298,7 +338,7 @@ def _make_agent_node(llm_with_tools, prompt_builder,
                 tc.get("name") == "get_vdot_paces"
                 for tc in (getattr(_last_ai, "tool_calls", None) or [])
             ):
-                rag_queries = _build_rag_queries(last_human_content, athlete_ctx)
+                rag_queries = _build_rag_queries(last_human_content, athlete_ctx, query_llm)
                 system_prompt += _rag_context_for(rag_queries)
         # ─────────────────────────────────────────────────────────────────────
 
@@ -485,6 +525,20 @@ async def build_multi_agent_graph():
         request_timeout=180,
     )
 
+    # Query LLM: separate model for RAG query generation when QUERY_MODEL_ID is set.
+    # Reuses the main LLM when unset so no extra model is loaded into VRAM.
+    if config.QUERY_MODEL_ID and config.QUERY_MODEL_ID != config.MODEL_ID:
+        query_llm = ChatOllama(
+            model=config.QUERY_MODEL_ID,
+            temperature=0,
+            base_url=config.OLLAMA_BASE_URL,
+            num_ctx=1024,
+            request_timeout=15,
+        )
+        logger.info("RAG query model: %s", config.QUERY_MODEL_ID)
+    else:
+        query_llm = llm
+
     trainer_llm      = llm.bind_tools(TRAINER_TOOLS)
     physio_llm       = llm.bind_tools(PHYSIO_TOOLS)
     recovery_llm     = llm.bind_tools(RECOVERY_TOOLS)
@@ -497,11 +551,11 @@ async def build_multi_agent_graph():
     graph.add_node("gather_trainer_context", _gather_trainer_context)
 
     # Agent nodes
-    graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt))
-    graph.add_node("physiotherapist", _make_agent_node(physio_llm,       build_physio_prompt))
-    graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,     build_recovery_prompt))
-    graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt, handoff_startup_tools=_DIETITIAN_HANDOFF_STARTUP_TOOLS))
-    graph.add_node("psychologist",    _make_agent_node(psychologist_llm, build_psychologist_prompt))
+    graph.add_node("trainer",         _make_agent_node(trainer_llm,      build_trainer_prompt,      query_llm=query_llm))
+    graph.add_node("physiotherapist", _make_agent_node(physio_llm,       build_physio_prompt,       query_llm=query_llm))
+    graph.add_node("recovery_coach",  _make_agent_node(recovery_llm,     build_recovery_prompt,     query_llm=query_llm))
+    graph.add_node("dietitian",       _make_agent_node(dietitian_llm,    build_dietitian_prompt,    handoff_startup_tools=_DIETITIAN_HANDOFF_STARTUP_TOOLS, query_llm=query_llm))
+    graph.add_node("psychologist",    _make_agent_node(psychologist_llm, build_psychologist_prompt, query_llm=query_llm))
 
     # Tool nodes — separate per agent so each only exposes its own tools
     graph.add_node("trainer_tools",      ToolNode(TRAINER_TOOLS))

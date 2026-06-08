@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     # ── Models ────────────────────────────────────────────────────────────────
     MODEL_ID: str = "qwen2.5:32b"
+    # Optional smaller/faster model for RAG query generation.
+    # If unset, the main MODEL_ID is reused (no extra VRAM cost).
+    # Example: QUERY_MODEL_ID=qwen2.5:3b
+    QUERY_MODEL_ID: str | None = None
     EMBED_MODEL: str = "BAAI/bge-large-en-v1.5"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
 
