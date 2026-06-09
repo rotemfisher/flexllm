@@ -42,10 +42,6 @@ class Settings(BaseSettings):
     # IANA timezone name — used for all scheduled job times.
     SCHEDULER_TIMEZONE: str = "Asia/Jerusalem"
 
-    # ── Legacy Chainlit fields (kept so existing .env files don't break) ──────
-    APP_PASSWORD: str = ""
-    CHAINLIT_AUTH_SECRET: str = ""
-
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
