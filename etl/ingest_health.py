@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-etl/ingest_health.py  —  Streaming ETL: Apple Health Export XML → SQLite
+etl/ingest_health.py  —  Streaming ETL: Apple Health Export XML → PostgreSQL
 
 Parses the export in one forward pass (iterparse / SAX-style), then processes
 GPX tracks, computes training load, and aggregates daily_health.
@@ -13,35 +13,42 @@ Deduplication strategy
   * gps_tracks      UNIQUE(workout_id, ts)
   * workout_laps    UNIQUE(workout_id, event_type, start_time)
 
-Every INSERT uses INSERT OR IGNORE against those indices, so the script is safe
-to re-run any number of times: nothing is ever duplicated or lost.
+Every INSERT uses ON CONFLICT DO NOTHING against those indices, so the script
+is safe to re-run any number of times: nothing is ever duplicated or lost.
+
+Requires: the PostgreSQL schema (sql/schema.sql) must already be applied.
 
 Usage:
     python etl/ingest_health.py
-    python etl/ingest_health.py --xml /path/to/export.xml --db /path/to/running.db
+    python etl/ingest_health.py --xml /path/to/export.xml --export-dir /path/to/export
+    DATABASE_URL=postgresql://user:pass@host/db python etl/ingest_health.py
 """
 
 import argparse
 import logging
 import math
+import os
 import re
-import sqlite3
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import psycopg2
+import psycopg2.extras
 from langsmith import traceable
 
 logger = logging.getLogger(__name__)
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
-ROOT        = Path(__file__).parent.parent
-DB_PATH     = ROOT / "data" / "personal" / "running.db"
-EXPORT_DIR  = ROOT / "data" / "personal" / "apple_health_export"
-XML_FILE    = EXPORT_DIR / "ייצוא.xml"
-SCHEMA_FILE = ROOT / "sql" / "schema.sql"
+ROOT       = Path(__file__).parent.parent
+EXPORT_DIR = ROOT / "data" / "personal" / "apple_health_export"
+XML_FILE   = EXPORT_DIR / "ייצוא.xml"
+
+_DEFAULT_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://localhost:5432/flexllm"
+)
 
 # ─── Lookup tables ────────────────────────────────────────────────────────────
 
@@ -100,35 +107,29 @@ DAILY_SCALAR_TYPES: dict[str, str] = {
     "HKQuantityTypeIdentifierHeartRateRecoveryOneMinute": "hr_recovery_1min_bpm",
 }
 
-# Pre-build per-column UPDATE SQL at module load time to avoid f-string
-# interpolation at runtime.  Column names come from the controlled dict above,
-# so this is safe — but pre-building makes the SQL auditable and avoids the
-# pattern entirely in hot paths.
+# Pre-build per-column UPDATE SQL at module load time.
+# Column names come from the controlled dict above, so this is safe.
 _DAILY_SCALAR_UPDATE: dict[str, str] = {
-    col: f"UPDATE daily_health SET {col} = ? WHERE date = ? AND {col} IS NULL"
+    col: f"UPDATE daily_health SET {col} = %s WHERE date = %s AND {col} IS NULL"
     for col in DAILY_SCALAR_TYPES.values()
 }
 
 _RING_COLUMN_UPDATE: dict[str, str] = {
-    col: f"UPDATE daily_health SET {col} = ? WHERE date = ? AND {col} IS NULL"
+    col: f"UPDATE daily_health SET {col} = %s WHERE date = %s AND {col} IS NULL"
     for col in ("active_calories", "exercise_min", "stand_hours")
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-# Apple Health timestamps: "YYYY-MM-DD HH:MM:SS ±HHMM"
-# Python 3.10 fromisoformat requires "±HH:MM" (colon, no leading space).
 _TZ_RE = re.compile(r'\s*([+-])(\d{2})(\d{2})$')
 
 
 def _normalize_ts(s: str) -> str:
-    """Convert Apple Health / HealthKit timestamp to a fromisoformat-safe string."""
     s = s.strip().replace("Z", "+00:00")
     return _TZ_RE.sub(r'\1\2:\3', s)
 
 
 def _ts(s: Optional[str]) -> Optional[str]:
-    """Parse any HealthKit/GPX timestamp to UTC 'YYYY-MM-DD HH:MM:SS'."""
     if not s:
         return None
     try:
@@ -153,7 +154,6 @@ def _f(v) -> Optional[float]:
 
 
 def _meta_num(raw: Optional[str]) -> Optional[float]:
-    """Extract the leading number from strings like '60.8 degF' or '6500 %'."""
     return _f(raw.split()[0]) if raw else None
 
 
@@ -162,7 +162,6 @@ def _f_to_c(val: Optional[float]) -> Optional[float]:
 
 
 def _dur_min(start_raw: str, end_raw: str) -> float:
-    """Duration in minutes between two raw HealthKit timestamps."""
     return (
         datetime.fromisoformat(_normalize_ts(end_raw))
         - datetime.fromisoformat(_normalize_ts(start_raw))
@@ -173,26 +172,21 @@ def _dur_min(start_raw: str, end_raw: str) -> float:
 
 class HealthIngester:
     """
-    Single-pass streaming ETL from an Apple Health Export directory into SQLite.
+    Single-pass streaming ETL from an Apple Health Export directory into PostgreSQL.
 
-    All table writes use INSERT OR IGNORE, so the instance can be run
+    All table writes use ON CONFLICT DO NOTHING, so the instance can be run
     against an already-populated database without creating any duplicates.
     """
 
     # ── Init ──────────────────────────────────────────────────────────────────
 
-    def __init__(self, db: Path, xml: Path, export_dir: Path) -> None:
-        self.db         = db
+    def __init__(self, database_url: str, xml: Path, export_dir: Path) -> None:
         self.xml        = xml
         self.export_dir = export_dir
 
-        self.con = sqlite3.connect(db)
-        self.con.execute("PRAGMA journal_mode  = WAL")
-        self.con.execute("PRAGMA synchronous   = NORMAL")
-        self.con.execute("PRAGMA cache_size    = -64000")  # 64 MB
+        self.con = psycopg2.connect(database_url)
+        self.cur = self.con.cursor()
         self._init_db()
-        # Disable FK during bulk ingestion for speed; re-enabled in run() finally block.
-        self.con.execute("PRAGMA foreign_keys = OFF")
 
         self.counts: dict[str, int] = dict.fromkeys(
             ["workouts", "laps", "running_form", "sleep",
@@ -201,43 +195,45 @@ class HealthIngester:
         )
 
     def _init_db(self) -> None:
-        """Apply schema (idempotent) then add dedup unique indices."""
-        self.con.executescript(SCHEMA_FILE.read_text())
-        self.con.executescript("""
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_workouts_start_type
-                ON workouts(start_date, activity_type);
+        """Create dedup unique indices (idempotent — schema must already exist)."""
+        for stmt in [
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_workouts_start_type "
+            "ON workouts(start_date, activity_type)",
 
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_sleep_window
-                ON sleep_records(start_time, end_time, stage);
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_sleep_window "
+            "ON sleep_records(start_time, end_time, stage)",
 
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_health_rec
-                ON health_records(metric_type, start_time, end_time, value);
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_health_rec "
+            "ON health_records(metric_type, start_time, end_time, value)",
 
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_gps_track
-                ON gps_tracks(workout_id, ts);
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_gps_track "
+            "ON gps_tracks(workout_id, ts)",
 
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_laps
-                ON workout_laps(workout_id, event_type, start_time);
-        """)
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_laps "
+            "ON workout_laps(workout_id, event_type, start_time)",
+        ]:
+            self.cur.execute(stmt)
+        self.con.commit()
 
     # ── Element handlers ──────────────────────────────────────────────────────
 
     def _on_me(self, elem) -> None:
-        if self.con.execute("SELECT COUNT(*) FROM athlete_profile").fetchone()[0]:
+        self.cur.execute("SELECT COUNT(*) FROM athlete_profile")
+        if self.cur.fetchone()[0]:
             return
         dob   = elem.get("HKCharacteristicTypeIdentifierDateOfBirth")
         sex   = elem.get("HKCharacteristicTypeIdentifierBiologicalSex", "")
         sex   = sex.replace("HKBiologicalSex", "").lower() or None
         blood = elem.get("HKCharacteristicTypeIdentifierBloodType", "")
         blood = blood.replace("HKBloodType", "") or None
-        self.con.execute(
-            "INSERT OR IGNORE INTO athlete_profile (date_of_birth, biological_sex, blood_type) VALUES (?,?,?)",
+        self.cur.execute(
+            "INSERT INTO athlete_profile (date_of_birth, biological_sex, blood_type) "
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
             (dob, sex, blood),
         )
         self.con.commit()
 
     def _workout_stats(self, elem) -> dict:
-        """Return {hk_type: {sum, avg, min, max, unit}} from WorkoutStatistics children."""
         out: dict = {}
         for s in elem.findall("WorkoutStatistics"):
             t = s.get("type")
@@ -271,9 +267,6 @@ class HealthIngester:
         stats = self._workout_stats(elem)
         meta  = self._workout_meta(elem)
 
-        # Distance: attribute first, fall back to statistics sum.
-        # HKQuantityTypeIdentifierDistanceWalkingRunning → km
-        # HKQuantityTypeIdentifierDistanceSwimming       → meters (convert to km)
         dist_run  = stats.get("HKQuantityTypeIdentifierDistanceWalkingRunning", {})
         dist_swim = stats.get("HKQuantityTypeIdentifierDistanceSwimming", {})
         raw_dist  = _f(elem.get("totalDistance"))
@@ -281,51 +274,42 @@ class HealthIngester:
             if dist_run.get("sum") is not None:
                 raw_dist = dist_run["sum"]
             elif dist_swim.get("sum") is not None:
-                raw_dist = dist_swim["sum"] / 1000  # m → km
-        distance = raw_dist
+                raw_dist = dist_swim["sum"] / 1000
 
-        # Calories
-        act_e = stats.get("HKQuantityTypeIdentifierActiveEnergyBurned", {})
-        bas_e = stats.get("HKQuantityTypeIdentifierBasalEnergyBurned", {})
+        act_e      = stats.get("HKQuantityTypeIdentifierActiveEnergyBurned", {})
+        bas_e      = stats.get("HKQuantityTypeIdentifierBasalEnergyBurned", {})
         active_cal = _f(elem.get("totalEnergyBurned")) or act_e.get("sum")
         basal_cal  = bas_e.get("sum")
+        hr_s       = stats.get("HKQuantityTypeIdentifierHeartRate", {})
+        sp_s       = stats.get("HKQuantityTypeIdentifierRunningSpeed", {})
+        step_s     = stats.get("HKQuantityTypeIdentifierStepCount", {})
+        steps      = int(step_s["sum"]) if step_s.get("sum") else None
 
-        # Heart rate aggregate
-        hr_s = stats.get("HKQuantityTypeIdentifierHeartRate", {})
-
-        # Speed aggregate
-        sp_s = stats.get("HKQuantityTypeIdentifierRunningSpeed", {})
-
-        # Steps
-        step_s = stats.get("HKQuantityTypeIdentifierStepCount", {})
-        steps  = int(step_s["sum"]) if step_s.get("sum") else None
-
-        # Weather (stored as "60.8 degF" / "6500 %" in MetadataEntry values)
         temp_c   = _f_to_c(_meta_num(meta.get("HKWeatherTemperature")))
-        # HKWeatherHumidity is in basis-points (0–10000 = 0–100 %)
         hum_raw  = _meta_num(meta.get("HKWeatherHumidity"))
         humidity = hum_raw / 100 if hum_raw is not None else None
-
-        indoor = int(meta.get("HKIndoorWorkout", "0") == "1")
+        indoor   = int(meta.get("HKIndoorWorkout", "0") == "1")
 
         gpx_ref  = elem.find(".//FileReference")
         gpx_path = gpx_ref.get("path") if gpx_ref is not None else None
 
-        cur = self.con.execute(
+        self.cur.execute(
             """
-            INSERT OR IGNORE INTO workouts
+            INSERT INTO workouts
                 (activity_type, start_date, end_date, duration_min, distance_km,
                  active_calories, basal_calories,
                  avg_heart_rate_bpm, min_heart_rate_bpm, max_heart_rate_bpm,
                  avg_speed_kmh,     min_speed_kmh,      max_speed_kmh,
                  step_count, indoor, weather_temp_c, weather_humidity_pct,
                  gpx_file_path, source_name)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT DO NOTHING
+            RETURNING id
             """,
             (
                 activity, start, end,
                 _f(elem.get("duration")),
-                distance,
+                raw_dist,
                 active_cal, basal_cal,
                 hr_s.get("avg"), hr_s.get("min"), hr_s.get("max"),
                 sp_s.get("avg"), sp_s.get("min"), sp_s.get("max"),
@@ -333,29 +317,29 @@ class HealthIngester:
                 gpx_path, elem.get("sourceName"),
             ),
         )
-
-        if not cur.rowcount:
+        row = self.cur.fetchone()
+        if row is None:
             return  # already in DB — skip children too
 
         self.counts["workouts"] += 1
-        wid = cur.lastrowid
+        wid = row[0]
 
-        # running_form — only for running workouts that have biomechanics stats
         if activity == "running":
             gc = stats.get("HKQuantityTypeIdentifierRunningGroundContactTime", {})
             vo = stats.get("HKQuantityTypeIdentifierRunningVerticalOscillation", {})
             sl = stats.get("HKQuantityTypeIdentifierRunningStrideLength", {})
             rp = stats.get("HKQuantityTypeIdentifierRunningPower", {})
             if any(s.get("avg") for s in (gc, vo, sl, rp)):
-                self.con.execute(
+                self.cur.execute(
                     """
-                    INSERT OR IGNORE INTO running_form
+                    INSERT INTO running_form
                         (workout_id,
                          ground_contact_avg_ms,      ground_contact_min_ms,      ground_contact_max_ms,
                          vertical_oscillation_avg_cm, vertical_oscillation_min_cm, vertical_oscillation_max_cm,
                          stride_length_avg_m,         stride_length_min_m,         stride_length_max_m,
                          running_power_avg_w,         running_power_min_w,         running_power_max_w)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
                     """,
                     (
                         wid,
@@ -367,15 +351,15 @@ class HealthIngester:
                 )
                 self.counts["running_form"] += 1
 
-        # workout_laps from WorkoutEvent children
         for ev in elem.findall("WorkoutEvent"):
             etype = WORKOUT_EVENTS.get(ev.get("type", ""),
                                        (ev.get("type") or "").lower())
             edate = _ts(ev.get("date"))
             if etype and edate:
-                self.con.execute(
-                    "INSERT OR IGNORE INTO workout_laps "
-                    "(workout_id, event_type, start_time, duration_min) VALUES (?,?,?,?)",
+                self.cur.execute(
+                    "INSERT INTO workout_laps "
+                    "(workout_id, event_type, start_time, duration_min) "
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                     (wid, etype, edate, _f(ev.get("duration"))),
                 )
                 self.counts["laps"] += 1
@@ -383,7 +367,6 @@ class HealthIngester:
     def _on_record(self, elem) -> None:
         rtype = elem.get("type", "")
 
-        # ── Sleep ──────────────────────────────────────────────────────────────
         if rtype == "HKCategoryTypeIdentifierSleepAnalysis":
             stage = SLEEP_STAGES.get(elem.get("value", ""))
             if not stage:
@@ -394,15 +377,15 @@ class HealthIngester:
             end   = _ts(end_raw)
             if not start or not end:
                 return
-            self.con.execute(
-                "INSERT OR IGNORE INTO sleep_records "
-                "(date, stage, start_time, end_time, duration_min) VALUES (?,?,?,?,?)",
+            self.cur.execute(
+                "INSERT INTO sleep_records "
+                "(date, stage, start_time, end_time, duration_min) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                 (_date(start), stage, start, end, _dur_min(start_raw, end_raw)),
             )
             self.counts["sleep"] += 1
             return
 
-        # ── Time-series health records (HR, running speed/power, steps) ────────
         if rtype in TIMESERIES_TYPES:
             metric = TIMESERIES_TYPES[rtype]
             start  = _ts(elem.get("startDate"))
@@ -410,47 +393,46 @@ class HealthIngester:
             val    = _f(elem.get("value"))
             if val is None or not start:
                 return
-            self.con.execute(
-                "INSERT OR IGNORE INTO health_records "
-                "(metric_type, start_time, end_time, value, unit) VALUES (?,?,?,?,?)",
+            self.cur.execute(
+                "INSERT INTO health_records "
+                "(metric_type, start_time, end_time, value, unit) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                 (metric, start, end or start, val, elem.get("unit")),
             )
             self.counts["health_rec"] += 1
             return
 
-        # ── Daily scalar metrics → daily_health ────────────────────────────────
         if rtype in DAILY_SCALAR_TYPES:
             col   = DAILY_SCALAR_TYPES[rtype]
             start = _ts(elem.get("startDate"))
             val   = _f(elem.get("value"))
             if val is None or not start:
                 return
-            # Apple stores SpO2 as a fraction 0–1; convert to 0–100 %
             if rtype == "HKQuantityTypeIdentifierOxygenSaturation" and val <= 1.0:
                 val *= 100
             date = _date(start)
-            self.con.execute(
-                "INSERT OR IGNORE INTO daily_health (date) VALUES (?)", (date,)
+            self.cur.execute(
+                "INSERT INTO daily_health (date) VALUES (%s) ON CONFLICT DO NOTHING",
+                (date,),
             )
-            # Keep the first (earliest) value per day per column
-            self.con.execute(_DAILY_SCALAR_UPDATE[col], (val, date))
+            self.cur.execute(_DAILY_SCALAR_UPDATE[col], (val, date))
 
     def _on_activity_summary(self, elem) -> None:
         date = elem.get("dateComponents")
         if not date:
             return
-        ac   = _f(elem.get("activeEnergyBurned"))
-        acg  = _f(elem.get("activeEnergyBurnedGoal"))
-        ex   = _f(elem.get("appleExerciseTime"))
-        exg  = _f(elem.get("appleExerciseTimeGoal"))
-        st   = _f(elem.get("appleStandHours"))
-        stg  = _f(elem.get("appleStandHoursGoal"))
+        ac  = _f(elem.get("activeEnergyBurned"))
+        acg = _f(elem.get("activeEnergyBurnedGoal"))
+        ex  = _f(elem.get("appleExerciseTime"))
+        exg = _f(elem.get("appleExerciseTimeGoal"))
+        st  = _f(elem.get("appleStandHours"))
+        stg = _f(elem.get("appleStandHoursGoal"))
 
-        self.con.execute(
-            "INSERT OR IGNORE INTO activity_rings "
+        self.cur.execute(
+            "INSERT INTO activity_rings "
             "(date, active_calories, active_calories_goal, "
             " exercise_min, exercise_min_goal, stand_hours, stand_hours_goal) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
             (
                 date, ac, acg, ex, exg,
                 int(st) if st is not None else None,
@@ -459,9 +441,9 @@ class HealthIngester:
         )
         self.counts["activity_rings"] += 1
 
-        # Seed daily_health from ring data
-        self.con.execute(
-            "INSERT OR IGNORE INTO daily_health (date) VALUES (?)", (date,)
+        self.cur.execute(
+            "INSERT INTO daily_health (date) VALUES (%s) ON CONFLICT DO NOTHING",
+            (date,),
         )
         stand_val = int(st) if st is not None else None
         for col, val in [
@@ -470,7 +452,7 @@ class HealthIngester:
             ("stand_hours",     stand_val),
         ]:
             if val is not None:
-                self.con.execute(_RING_COLUMN_UPDATE[col], (val, date))
+                self.cur.execute(_RING_COLUMN_UPDATE[col], (val, date))
 
     # ── XML streaming ─────────────────────────────────────────────────────────
 
@@ -485,26 +467,20 @@ class HealthIngester:
                 if event == "start":
                     if elem.tag == "Workout":
                         inside_workout = True
-                    continue  # ← only process 'end' events below
+                    continue
 
                 tag = elem.tag
 
                 if tag == "Me":
                     self._on_me(elem)
-
                 elif tag == "Workout":
                     inside_workout = False
                     self._on_workout(elem)
-
                 elif tag == "Record" and not inside_workout:
                     self._on_record(elem)
-
                 elif tag == "ActivitySummary" and not inside_workout:
                     self._on_activity_summary(elem)
 
-                # Free memory: clear elements we are done with.
-                # Do NOT clear while inside_workout — children must stay alive
-                # until the parent Workout 'end' event is processed.
                 if not inside_workout:
                     elem.clear()
 
@@ -532,10 +508,11 @@ class HealthIngester:
     # ── GPX streaming ─────────────────────────────────────────────────────────
 
     def _stream_gpx(self) -> None:
-        NS   = "{http://www.topografix.com/GPX/1/1}"
-        rows = self.con.execute(
+        NS = "{http://www.topografix.com/GPX/1/1}"
+        self.cur.execute(
             "SELECT id, gpx_file_path FROM workouts WHERE gpx_file_path IS NOT NULL"
-        ).fetchall()
+        )
+        rows = self.cur.fetchall()
         logger.info("Parsing %d GPX files …", len(rows))
 
         FLUSH = 2000
@@ -557,7 +534,7 @@ class HealthIngester:
                 t   = pt.findtext(f"{NS}time")
                 ts  = _ts(t) if t else None
                 ext = pt.find(f"{NS}extensions")
-                spd = _f(ext.findtext("speed"))  if ext is not None else None  # m/s
+                spd = _f(ext.findtext("speed"))  if ext is not None else None
                 crs = _f(ext.findtext("course")) if ext is not None else None
 
                 if lat and lon and ts:
@@ -572,11 +549,13 @@ class HealthIngester:
     def _flush_gps(self, batch: list) -> None:
         if not batch:
             return
-        self.con.executemany(
-            "INSERT OR IGNORE INTO gps_tracks "
+        psycopg2.extras.execute_batch(
+            self.cur,
+            "INSERT INTO gps_tracks "
             "(workout_id, ts, lat, lon, elevation_m, speed_ms, course_deg) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
             batch,
+            page_size=1000,
         )
         self.con.commit()
         self.counts["gps_tracks"] += len(batch)
@@ -586,20 +565,18 @@ class HealthIngester:
     @traceable(name="etl:compute_training_stress", run_type="tool")
     def _compute_tss(self) -> None:
         logger.info("Computing TSS (TRIMP) …")
-        profile = self.con.execute(
-            "SELECT date_of_birth FROM athlete_profile LIMIT 1"
-        ).fetchone()
+        self.cur.execute("SELECT date_of_birth FROM athlete_profile LIMIT 1")
+        profile = self.cur.fetchone()
         max_hr = 190.0
         if profile and profile[0]:
             try:
                 current_year = datetime.now(timezone.utc).year
                 age = current_year - int(profile[0][:4])
-                # Tanaka formula is more accurate than the classic 220-age
                 max_hr = 208.0 - 0.7 * age
             except Exception:
                 pass
 
-        rows = self.con.execute(
+        self.cur.execute(
             """
             SELECT w.id, w.duration_min, w.avg_heart_rate_bpm, dh.resting_heart_rate_bpm
             FROM   workouts w
@@ -608,7 +585,8 @@ class HealthIngester:
               AND  w.duration_min        IS NOT NULL
               AND  w.training_stress_score IS NULL
             """
-        ).fetchall()
+        )
+        rows = self.cur.fetchall()
 
         updates = []
         for wid, dur, avg_hr, rhr in rows:
@@ -618,8 +596,11 @@ class HealthIngester:
             updates.append((round(trimp, 2), wid))
 
         if updates:
-            self.con.executemany(
-                "UPDATE workouts SET training_stress_score = ? WHERE id = ?", updates
+            psycopg2.extras.execute_batch(
+                self.cur,
+                "UPDATE workouts SET training_stress_score = %s WHERE id = %s",
+                updates,
+                page_size=1000,
             )
             self.con.commit()
         logger.info("TSS set on %d workouts.", len(updates))
@@ -629,9 +610,9 @@ class HealthIngester:
     @traceable(name="etl:aggregate_daily_health", run_type="tool")
     def _aggregate_daily(self) -> None:
         logger.info("Aggregating daily_health …")
-        self.con.executescript(
+
+        self.cur.execute(
             """
-            -- Sleep totals per night
             UPDATE daily_health SET
                 sleep_total_min = (SELECT SUM(duration_min) FROM sleep_records
                                    WHERE date = daily_health.date AND stage != 'in_bed'),
@@ -643,9 +624,12 @@ class HealthIngester:
                                    WHERE date = daily_health.date AND stage = 'core'),
                 sleep_awake_min = (SELECT SUM(duration_min) FROM sleep_records
                                    WHERE date = daily_health.date AND stage = 'awake')
-            WHERE EXISTS (SELECT 1 FROM sleep_records WHERE date = daily_health.date);
+            WHERE EXISTS (SELECT 1 FROM sleep_records WHERE date = daily_health.date)
+            """
+        )
 
-            -- Daily step count (sum time-series records for the day)
+        self.cur.execute(
+            """
             UPDATE daily_health SET
                 step_count = (
                     SELECT CAST(SUM(value) AS INTEGER)
@@ -657,16 +641,19 @@ class HealthIngester:
                 SELECT 1 FROM health_records
                 WHERE metric_type = 'step_count'
                   AND substr(start_time, 1, 10) = daily_health.date
-            );
+            )
+            """
+        )
 
-            -- Daily TSS = sum of all workout TSS for that calendar day
+        self.cur.execute(
+            """
             UPDATE daily_health SET
                 daily_tss = (
                     SELECT COALESCE(SUM(training_stress_score), 0)
                     FROM   workouts
                     WHERE  substr(start_date, 1, 10) = daily_health.date
                       AND  training_stress_score IS NOT NULL
-                );
+                )
             """
         )
         self.con.commit()
@@ -676,12 +663,13 @@ class HealthIngester:
     @traceable(name="etl:compute_atl_ctl_tsb", run_type="tool")
     def _compute_load(self) -> None:
         logger.info("Computing ATL / CTL / TSB …")
-        rows = self.con.execute(
+        self.cur.execute(
             "SELECT date, daily_tss FROM daily_health ORDER BY date"
-        ).fetchall()
+        )
+        rows = self.cur.fetchall()
 
-        K7  = math.exp(-1 / 7)   # 7-day acute training load decay
-        K42 = math.exp(-1 / 42)  # 42-day chronic training load decay
+        K7  = math.exp(-1 / 7)
+        K42 = math.exp(-1 / 42)
         atl = ctl = 0.0
         ups = []
         for date, tss in rows:
@@ -690,8 +678,11 @@ class HealthIngester:
             ctl = ctl * K42 + tss * (1 - K42)
             ups.append((round(atl, 2), round(ctl, 2), round(ctl - atl, 2), date))
 
-        self.con.executemany(
-            "UPDATE daily_health SET atl=?, ctl=?, tsb=? WHERE date=?", ups
+        psycopg2.extras.execute_batch(
+            self.cur,
+            "UPDATE daily_health SET atl=%s, ctl=%s, tsb=%s WHERE date=%s",
+            ups,
+            page_size=1000,
         )
         self.con.commit()
         logger.info("Training load computed for %d days.", len(ups))
@@ -707,9 +698,7 @@ class HealthIngester:
             self._aggregate_daily()
             self._compute_load()
         finally:
-            # Always re-enable FK enforcement and close the connection, even on error.
-            self.con.execute("PRAGMA foreign_keys = ON")
-            self.con.commit()
+            self.cur.close()
             self.con.close()
         logger.info("Ingestion complete.")
 
@@ -723,13 +712,19 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    p = argparse.ArgumentParser(description="Stream Apple Health Export XML → SQLite")
-    p.add_argument("--xml",        type=Path, default=XML_FILE,    metavar="PATH")
-    p.add_argument("--db",         type=Path, default=DB_PATH,     metavar="PATH")
-    p.add_argument("--export-dir", type=Path, default=EXPORT_DIR,  metavar="PATH")
+    p = argparse.ArgumentParser(
+        description="Stream Apple Health Export XML → PostgreSQL"
+    )
+    p.add_argument("--xml",          type=Path, default=XML_FILE,             metavar="PATH")
+    p.add_argument("--export-dir",   type=Path, default=EXPORT_DIR,           metavar="PATH")
+    p.add_argument("--database-url", type=str,  default=_DEFAULT_DATABASE_URL, metavar="URL")
     args = p.parse_args()
 
-    ingester = HealthIngester(db=args.db, xml=args.xml, export_dir=args.export_dir)
+    ingester = HealthIngester(
+        database_url=args.database_url,
+        xml=args.xml,
+        export_dir=args.export_dir,
+    )
     ingester.run()
 
 

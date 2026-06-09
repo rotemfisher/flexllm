@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --timeout=300 -r requirements.txt
 FROM deps AS runtime
 
 # Create non-root user for security.
-RUN groupadd -r appuser && useradd -r -g appuser appuser && chown appuser:appuser /app
+RUN groupadd -r appuser && useradd -r -g appuser appuser && chown appuser:appuser /app && mkdir -p /home/appuser && chown -R appuser:appuser /home/appuser
 
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser sql/ ./sql/

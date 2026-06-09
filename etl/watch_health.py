@@ -35,8 +35,8 @@ ROOT = Path(__file__).parent.parent
 _DEFAULT_EXPORT_DIR = Path(
     os.environ.get("HEALTH_EXPORT_DIR", ROOT / "data" / "personal" / "apple_health_export")
 )
-_DEFAULT_DB_PATH = Path(
-    os.environ.get("DB_PATH", ROOT / "data" / "personal" / "running.db")
+_DEFAULT_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://localhost:5432/flexllm"
 )
 
 DEBOUNCE_SECONDS = 3.0
@@ -52,9 +52,9 @@ logger = logging.getLogger(__name__)
 class HealthExportHandler(FileSystemEventHandler):
     """Watches for .xml changes inside the export directory and schedules an ingest."""
 
-    def __init__(self, export_dir: Path, db_path: Path, debounce: float = DEBOUNCE_SECONDS):
+    def __init__(self, export_dir: Path, database_url: str, debounce: float = DEBOUNCE_SECONDS):
         self._export_dir = export_dir
-        self._db_path = db_path
+        self._database_url = database_url
         self._debounce = debounce
         self._last_event_time = 0.0
         self._pending = False
@@ -84,31 +84,30 @@ class HealthExportHandler(FileSystemEventHandler):
         if time.monotonic() - self._last_event_time < self._debounce:
             return False
         self._pending = False
-        _run_ingest(self._export_dir, self._db_path)
+        _run_ingest(self._export_dir, self._database_url)
         return True
 
 
-def _run_ingest(export_dir: Path, db_path: Path) -> None:
+def _run_ingest(export_dir: Path, database_url: str) -> None:
     """Locate the XML file and launch ingest_health.py as a subprocess."""
     xml_candidates = sorted(export_dir.glob("*.xml"))
     if not xml_candidates:
         logger.warning("No .xml file found in %s — skipping ingest.", export_dir)
         return
 
-    # Prefer export.xml / ייצוא.xml; fall back to any .xml present.
     xml_path = next(
         (p for p in xml_candidates if p.stem.lower() in ("export", "ייצוא")),
         xml_candidates[0],
     )
 
-    logger.info("Ingesting %s → %s …", xml_path.name, db_path)
+    logger.info("Ingesting %s → PostgreSQL …", xml_path.name)
     ingest_script = Path(__file__).parent / "ingest_health.py"
     result = subprocess.run(
         [
             sys.executable, str(ingest_script),
-            "--xml",        str(xml_path),
-            "--db",         str(db_path),
-            "--export-dir", str(export_dir),
+            "--xml",          str(xml_path),
+            "--export-dir",   str(export_dir),
+            "--database-url", database_url,
         ],
         check=False,
     )
@@ -124,8 +123,8 @@ def main() -> None:
     )
     p.add_argument("--export-dir", type=Path, default=_DEFAULT_EXPORT_DIR, metavar="PATH",
                    help="Directory containing the Apple Health XML export")
-    p.add_argument("--db", type=Path, default=_DEFAULT_DB_PATH, metavar="PATH",
-                   help="Target SQLite database path")
+    p.add_argument("--database-url", type=str, default=_DEFAULT_DATABASE_URL, metavar="URL",
+                   help="PostgreSQL connection URL")
     p.add_argument("--debounce", type=float, default=DEBOUNCE_SECONDS, metavar="SECS",
                    help="Seconds to wait after the last event before triggering ingest "
                         "(allows slow file copies to finish)")
@@ -134,14 +133,14 @@ def main() -> None:
     args = p.parse_args()
 
     if args.once:
-        _run_ingest(args.export_dir, args.db)
+        _run_ingest(args.export_dir, args.database_url)
         return
 
     if not args.export_dir.exists():
         logger.warning("Watch directory %s does not exist — creating it.", args.export_dir)
         args.export_dir.mkdir(parents=True, exist_ok=True)
 
-    handler = HealthExportHandler(args.export_dir, args.db, args.debounce)
+    handler = HealthExportHandler(args.export_dir, args.database_url, args.debounce)
     observer = Observer()
     observer.schedule(handler, str(args.export_dir), recursive=False)
     observer.start()

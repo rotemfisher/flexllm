@@ -1020,5 +1020,5 @@ async def build_multi_agent_graph():
         "psychologist":    "gather_psychologist_context",
     })
 
-    async with await AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
+    async with AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
         yield graph.compile(checkpointer=checkpointer)

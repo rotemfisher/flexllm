@@ -1,5 +1,26 @@
 services:
 
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: flexllm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flexllm
+      POSTGRES_USER: ${POSTGRES_USER:-flexllm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - flexllm
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flexllm} -d flexllm"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
   # ── Qdrant vector database ────────────────────────────────────────────────────
   # Runs as its own service so it can be restarted independently of the app and
   # so the storage is not locked by a single process.  The app connects via HTTP
@@ -33,6 +54,7 @@ services:
     environment:
       ENVIRONMENT: prod
       DB_PATH: /data/personal/running.db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-flexllm}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/flexllm
       # Use the Qdrant service instead of the embedded file client.
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-coaching_books}
@@ -58,13 +80,12 @@ services:
       - "8000:8000"
     networks:
       - flexllm
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       qdrant:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
@@ -87,8 +108,7 @@ services:
     command: python etl/watch_health.py
     environment:
       HEALTH_EXPORT_DIR: /data/personal/apple_health_export
-      DB_PATH: /data/personal/running.db
-      # Needed so ingest_health.py can import src/ without installing the package
+      DATABASE_URL: postgresql://${POSTGRES_USER:-flexllm}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/flexllm
       PYTHONPATH: /app
     volumes:
       - ./data:/data:rw
@@ -101,6 +121,8 @@ services:
 volumes:
   model_cache:
     name: flexllm-model-cache
+  postgres_data:
+    name: flexllm-postgres-data
 
 networks:
   flexllm:
