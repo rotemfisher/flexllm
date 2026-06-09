@@ -1022,3 +1022,27 @@ async def build_multi_agent_graph():
 
     async with AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
         yield graph.compile(checkpointer=checkpointer)
+
+
+async def inject_bot_message_into_thread(text: str) -> None:
+    """Store a proactive bot message in the LangGraph conversation thread.
+
+    Called after every scheduled job send so the interactive agent has full
+    context when the user replies to a proactive message.
+    """
+    plain = re.sub(r"<[^>]+>", "", text).strip()
+    if not plain:
+        return
+
+    thread_cfg = {"configurable": {"thread_id": str(config.TELEGRAM_ALLOWED_USER_ID)}}
+
+    async with AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
+        # Minimal graph — only the state schema matters for aupdate_state.
+        g: StateGraph = StateGraph(CoachState)
+        g.add_node("_noop", lambda s: {})
+        g.add_edge(START, "_noop")
+        g.add_edge("_noop", END)
+        compiled = g.compile(checkpointer=checkpointer)
+        await compiled.aupdate_state(thread_cfg, {"messages": [AIMessage(content=plain)]})
+
+    logger.debug("Stored proactive message in thread %s", config.TELEGRAM_ALLOWED_USER_ID)

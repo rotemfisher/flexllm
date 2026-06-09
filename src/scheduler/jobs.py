@@ -42,6 +42,13 @@ async def _send(bot, text: str) -> None:
         )
     except Exception:
         logger.exception("Failed to send proactive message")
+        return
+
+    try:
+        from src.agent.graph import inject_bot_message_into_thread
+        await inject_bot_message_into_thread(text)
+    except Exception:
+        logger.exception("Failed to store proactive message in thread")
 
 
 # ── Job 1: Morning Briefing ───────────────────────────────────────────────────

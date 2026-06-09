@@ -308,6 +308,11 @@ async def run_weekly_review(bot) -> None:
             parse_mode="HTML",
             reply_markup=keyboard,
         )
+        try:
+            from src.agent.graph import inject_bot_message_into_thread
+            await inject_bot_message_into_thread(msg)
+        except Exception:
+            logger.exception("Failed to store weekly review in thread")
     except Exception:
         logger.exception("run_weekly_review pipeline failed")
         try:
