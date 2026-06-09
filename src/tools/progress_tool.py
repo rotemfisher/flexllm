@@ -41,7 +41,7 @@ def get_progress_report(weeks: int = 8) -> str:
                     ROUND(AVG(CAST(rpe AS REAL)), 1)         AS avg_rpe,
                     ROUND(SUM(training_stress_score), 0)     AS total_tss
                 FROM v_running_overview
-                WHERE start_date >= CURRENT_DATE + %s::interval
+                WHERE start_date::date >= CURRENT_DATE + %s::interval
                 GROUP BY week
                 ORDER BY week DESC
                 """,

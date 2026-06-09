@@ -1021,6 +1021,7 @@ async def build_multi_agent_graph():
     })
 
     async with AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
+        await checkpointer.setup()
         yield graph.compile(checkpointer=checkpointer)
 
 

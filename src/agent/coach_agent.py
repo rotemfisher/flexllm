@@ -47,7 +47,7 @@ def get_athlete_context() -> str:
                 SELECT activity_type, start_date, distance_km, duration_min,
                        avg_heart_rate_bpm, avg_speed_kmh, training_stress_score
                 FROM workouts
-                WHERE start_date >= CURRENT_DATE - INTERVAL '56 days'
+                WHERE start_date::date >= CURRENT_DATE - INTERVAL '56 days'
                 ORDER BY start_date DESC
                 LIMIT 20
                 """
