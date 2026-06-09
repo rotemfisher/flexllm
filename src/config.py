@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # The bot ignores every message from any other user ID entirely.
     TELEGRAM_ALLOWED_USER_ID: int
 
+    # ── Scheduler (proactive coaching jobs) ──────────────────────────────────
+    # IANA timezone name — used for all scheduled job times.
+    SCHEDULER_TIMEZONE: str = "Asia/Jerusalem"
+
     # ── Legacy Chainlit fields (kept so existing .env files don't break) ──────
     APP_PASSWORD: str = ""
     CHAINLIT_AUTH_SECRET: str = ""

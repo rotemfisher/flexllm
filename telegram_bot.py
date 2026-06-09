@@ -20,10 +20,12 @@ Architecture notes:
   Docker's healthcheck and watcher's depends_on still work.
 """
 import asyncio
+import datetime as dt
 import html
 import logging
 import re
 import threading
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
@@ -592,6 +594,55 @@ async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text("Send /start to begin your coaching session.")
 
 
+# ── Proactive scheduler ───────────────────────────────────────────────────────
+
+def _setup_scheduler(application: Application) -> None:
+    """Register all proactive coaching jobs with PTB's built-in JobQueue."""
+    from src.scheduler.jobs import (
+        morning_briefing_job,
+        preworkout_reminder_job,
+        daily_nutrition_job,
+        evening_summary_job,
+        weekend_review_job,
+    )
+
+    tz = ZoneInfo(config.SCHEDULER_TIMEZONE)
+    jq = application.job_queue
+
+    # Morning briefing: 07:00 — readiness + workout recommendation
+    jq.run_daily(morning_briefing_job,    time=dt.time(7,  0, tzinfo=tz))
+    # Daily nutrition plan: 07:30
+    jq.run_daily(daily_nutrition_job,     time=dt.time(7, 30, tzinfo=tz))
+    # Pre-workout briefing: 17:30 (30 min before default 18:00 workout slot)
+    jq.run_daily(preworkout_reminder_job, time=dt.time(17, 30, tzinfo=tz))
+    # Evening summary: 21:00
+    jq.run_daily(evening_summary_job,     time=dt.time(21,  0, tzinfo=tz))
+    # Weekly review: Saturdays at 22:00 only (days tuple: 0=Sun … 6=Sat in PTB)
+    jq.run_daily(weekend_review_job,      time=dt.time(22,  0, tzinfo=tz), days=(6,))
+
+    logger.info("Proactive coaching scheduler initialised (tz=%s)", config.SCHEDULER_TIMEZONE)
+
+
+# ── Weekly plan approval callbacks ────────────────────────────────────────────
+
+async def weekly_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline-button responses to the Saturday-night weekly plan message."""
+    from src.scheduler.weekly_supervisor import WEEKLY_PLAN_APPROVED, WEEKLY_PLAN_ADJUST
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    if query.data == WEEKLY_PLAN_APPROVED:
+        await update.effective_chat.send_message(
+            "✅ Plan confirmed — have a strong week! 💪",
+            parse_mode="HTML",
+        )
+    elif query.data == WEEKLY_PLAN_ADJUST:
+        await update.effective_chat.send_message(
+            "Got it. Send /start and tell me which sessions you'd like to change.",
+            parse_mode="HTML",
+        )
+
+
 # ── Health server (port 8000, daemon thread) ──────────────────────────────────
 
 def _start_health_server() -> None:
@@ -608,6 +659,7 @@ async def _post_init(application: Application) -> None:
     application.bot_data["graph"] = graph
     application.bot_data["_graph_ctx"] = ctx
     _api_pkg.dependencies.compiled_graph = graph
+    _setup_scheduler(application)
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -637,11 +689,11 @@ def main() -> None:
             ONBOARDING_NAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_name)],
             ONBOARDING_DOB:     [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_dob)],
             ONBOARDING_HEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_height)],
-            ONBOARDING_SEX:     [CallbackQueryHandler(onboarding_sex)],
+            ONBOARDING_SEX:     [CallbackQueryHandler(onboarding_sex, pattern="^(male|female|other)$")],
             ONBOARDING_WEIGHT:  [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_weight)],
             ONBOARDING_GOAL:    [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_goal)],
-            ONBOARDING_LEVEL:   [CallbackQueryHandler(onboarding_level)],
-            ONBOARDING_DIET:    [CallbackQueryHandler(onboarding_diet)],
+            ONBOARDING_LEVEL:   [CallbackQueryHandler(onboarding_level, pattern="^(beginner|intermediate|advanced)$")],
+            ONBOARDING_DIET:    [CallbackQueryHandler(onboarding_diet, pattern="^(omnivore|vegetarian|vegan|gluten-free)$")],
             ONBOARDING_MEDICAL: [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_medical)],
             CHAT:               [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, chat_message)],
         },
@@ -651,6 +703,11 @@ def main() -> None:
     )
 
     application.add_handler(conv)
+    # Weekly plan approval buttons — registered before the catch-all so they
+    # are not swallowed by the ConversationHandler's fallback paths.
+    application.add_handler(
+        CallbackQueryHandler(weekly_plan_callback, pattern="^weekly_plan:")
+    )
     # Catch-all for anyone who messages before /start (or unknown users — they
     # won't pass OWNER_FILTER in the ConversationHandler so they end up here).
     application.add_handler(

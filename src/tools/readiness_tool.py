@@ -48,7 +48,7 @@ def get_daily_readiness(date: str | None = None) -> str:
                        resting_heart_rate_bpm, hrv_sdnn_ms, body_mass_kg,
                        sleep_total_min, sleep_deep_min, sleep_rem_min
                 FROM daily_health
-                WHERE date <= ?
+                WHERE date <= %s
                 ORDER BY date DESC LIMIT 1
                 """,
                 (date,),
