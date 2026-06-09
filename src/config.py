@@ -12,8 +12,6 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql://localhost:5432/flexllm"
-    # Legacy SQLite path — kept for ETL scripts and one-time data import only.
-    DB_PATH: Path = _PROJECT_ROOT / "data" / "personal" / "running.db"
     QDRANT_PATH: Path = _PROJECT_ROOT / "data" / "qdrant_db"
     # When running the dedicated qdrant container, set QDRANT_URL (e.g.
     # http://qdrant:6333).  If set it takes precedence over QDRANT_PATH.

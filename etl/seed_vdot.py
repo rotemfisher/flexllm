@@ -12,30 +12,16 @@ get_vdot_paces() will return the nearest available value for missing entries.
 
 Run once:
     python etl/seed_vdot.py
+    DATABASE_URL=postgresql://user:pass@host/db python etl/seed_vdot.py
 """
 
-import sqlite3
-from pathlib import Path
+import os
 
-DB_PATH = Path(__file__).parent.parent / "data" / "personal" / "running.db"
+import psycopg2
 
-CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS vdot_paces (
-    vdot            INTEGER PRIMARY KEY,
-    -- All paces stored as seconds per km
-    -- Easy / Long run range
-    e_pace_slow_sec INTEGER,   -- slower end of E zone
-    e_pace_fast_sec INTEGER,   -- faster end of E zone
-    -- Marathon pace
-    m_pace_sec      INTEGER,
-    -- Threshold (Tempo) pace
-    t_pace_sec      INTEGER,
-    -- Interval pace (per 400m, converted to sec/km for consistency)
-    i_pace_sec      INTEGER,
-    -- Repetition pace (per 200m, converted to sec/km)
-    r_pace_sec      INTEGER
-);
-"""
+_DEFAULT_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql://localhost:5432/flexllm"
+)
 
 # fmt: off
 # Source: Daniels' Running Formula 4th ed., Table 3.1
@@ -80,27 +66,28 @@ def sec_to_pace(sec: int) -> str:
     return f"{sec // 60}:{sec % 60:02d}"
 
 
-def seed(db_path: Path) -> None:
-    con = sqlite3.connect(db_path)
+def seed(database_url: str = _DEFAULT_DATABASE_URL) -> None:
+    con = psycopg2.connect(database_url)
     try:
-        con.execute(CREATE_TABLE)
-
-        con.executemany(
+        cur = con.cursor()
+        cur.executemany(
             """
-            INSERT OR REPLACE INTO vdot_paces
+            INSERT INTO vdot_paces
                 (vdot, e_pace_slow_sec, e_pace_fast_sec, m_pace_sec,
                  t_pace_sec, i_pace_sec, r_pace_sec)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (vdot) DO NOTHING
             """,
             VDOT_DATA,
         )
         con.commit()
 
-        count = con.execute("SELECT COUNT(*) FROM vdot_paces").fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM vdot_paces")
+        count = cur.fetchone()[0]
         print(f"Seeded {count} VDOT rows")
 
-        # Quick sanity check
-        row = con.execute("SELECT * FROM vdot_paces WHERE vdot = 50").fetchone()
+        cur.execute("SELECT * FROM vdot_paces WHERE vdot = 50")
+        row = cur.fetchone()
         if row:
             vdot, e_slow, e_fast, m, t, i, r = row
             print(f"\nVDOT 50 sample:")
@@ -114,4 +101,4 @@ def seed(db_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    seed(DB_PATH)
+    seed()

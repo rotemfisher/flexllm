@@ -1,5 +1,5 @@
 """
-tests/test_db.py  —  Read-only data-quality tests for data/personal/running.db
+tests/test_db.py  —  Read-only data-quality tests for the production PostgreSQL DB.
 
 All tests use the `prod_db` session fixture from conftest.py.
 Nothing in this file writes to the database.
@@ -47,11 +47,11 @@ VDOT_50 = {
 # ─── Schema ───────────────────────────────────────────────────────────────────
 
 def test_dedup_indices_present(prod_db):
-    """All five dedup unique indices must be in sqlite_master."""
+    """All five dedup unique indices must exist in the public schema."""
     present = {
-        row[0]
+        row["indexname"]
         for row in prod_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
         )
     }
     missing = DEDUP_INDICES - present
@@ -61,13 +61,13 @@ def test_dedup_indices_present(prod_db):
 def test_view_exists_and_returns_rows(prod_db):
     """v_running_overview must exist and return at least one row."""
     views = {
-        row[0]
+        row["table_name"]
         for row in prod_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='view'"
+            "SELECT table_name FROM information_schema.views WHERE table_schema = 'public'"
         )
     }
     assert "v_running_overview" in views, "v_running_overview view is missing"
-    count = prod_db.execute("SELECT COUNT(*) FROM v_running_overview").fetchone()[0]
+    count = prod_db.execute("SELECT COUNT(*) FROM v_running_overview").fetchone()["count"]
     assert count > 0, "v_running_overview returned 0 rows"
 
 
@@ -77,7 +77,6 @@ def test_table_counts_within_expected_ranges(prod_db):
     """
     Each populated table must be within a generous range.
     Tables that are intentionally empty must be exactly 0.
-    Ranges are wide enough to survive a future Apple Health sync.
     """
     ranges = {
         "workouts":       (120, 300),
@@ -93,11 +92,11 @@ def test_table_counts_within_expected_ranges(prod_db):
     empty_tables = ["kilometer_splits", "shoes", "run_summaries"]
 
     for table, (lo, hi) in ranges.items():
-        n = prod_db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        n = prod_db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()["count"]
         assert lo <= n <= hi, f"{table}: expected {lo}–{hi} rows, got {n}"
 
     for table in empty_tables:
-        n = prod_db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        n = prod_db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()["count"]
         assert n == 0, f"{table}: expected 0 rows (not yet populated), got {n}"
 
 
@@ -106,14 +105,12 @@ def test_table_counts_within_expected_ranges(prod_db):
 def test_workout_dates_are_utc_format(prod_db):
     """
     Every start_date must match 'YYYY-MM-DD HH:MM:SS'.
-    The ETL normalises all timestamps to UTC; a timezone offset or ISO-8601 T
-    variant would corrupt date() / substr() aggregations.
+    The ETL normalises all timestamps to UTC.
     """
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM workouts "
-        "WHERE start_date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] "
-        "[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'"
-    ).fetchone()[0]
+        "WHERE start_date !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'"
+    ).fetchone()["count"]
     assert bad == 0, f"{bad} workouts have malformed start_date"
 
 
@@ -123,30 +120,28 @@ def test_running_workout_durations_positive(prod_db):
         "SELECT COUNT(*) FROM workouts "
         "WHERE activity_type = 'running' "
         "AND (duration_min IS NULL OR duration_min <= 0)"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, f"{bad} running workouts have NULL/zero duration_min"
 
 
 def test_running_workout_distances_reasonable(prod_db):
     """
     Non-null distances for land-based activities must be between 0.1 km and 150 km.
-    Swimming is excluded: Apple Health reports HKQuantityTypeIdentifierDistanceSwimming
-    in meters; the ETL converts new ingestions to km, but existing pool-swim rows in the
-    production DB (750–2000 m stored raw) are expected to be > 150.
+    Swimming is excluded: pool-swim rows may be stored in meters.
     """
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM workouts "
         "WHERE distance_km IS NOT NULL "
         "AND activity_type IN ('running', 'walking', 'hiking', 'cycling') "
         "AND (distance_km < 0.1 OR distance_km > 150)"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, f"{bad} land-activity workouts have distance_km outside [0.1, 150]"
 
 
 def test_activity_types_are_known_values(prod_db):
     """All activity_type values must be from the ETL's ACTIVITY_TYPES mapping."""
     found = {
-        row[0]
+        row["activity_type"]
         for row in prod_db.execute("SELECT DISTINCT activity_type FROM workouts")
     }
     unknown = found - KNOWN_ACTIVITY_TYPES
@@ -158,60 +153,49 @@ def test_activity_types_are_known_values(prod_db):
 # ─── Referential integrity ────────────────────────────────────────────────────
 
 def test_running_form_linked_to_running_workouts(prod_db):
-    """
-    Every running_form row must reference a workout with activity_type='running'.
-    The FK only checks existence, not type — this catches ingester routing bugs.
-    """
+    """Every running_form row must reference a workout with activity_type='running'."""
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM running_form rf "
         "LEFT JOIN workouts w ON w.id = rf.workout_id "
         "WHERE w.activity_type != 'running' OR w.id IS NULL"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, f"{bad} running_form rows linked to non-running or missing workouts"
 
 
 def test_gps_tracks_linked_to_gpx_workouts(prod_db):
-    """
-    Every gps_tracks row must reference a workout that has a gpx_file_path.
-    Orphaned GPS points or tracks for workouts without GPX files indicate a
-    mis-matched GPX parse.
-    """
+    """Every gps_tracks row must reference an existing workout."""
     orphaned = prod_db.execute(
         "SELECT COUNT(*) FROM gps_tracks g "
         "LEFT JOIN workouts w ON w.id = g.workout_id "
         "WHERE w.id IS NULL"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert orphaned == 0, f"{orphaned} gps_tracks reference non-existent workout_id"
 
     no_gpx = prod_db.execute(
         "SELECT COUNT(*) FROM gps_tracks g "
         "JOIN workouts w ON w.id = g.workout_id "
         "WHERE w.gpx_file_path IS NULL"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert no_gpx == 0, f"{no_gpx} gps_tracks linked to workouts without a gpx_file_path"
 
 
 # ─── Computed fields ──────────────────────────────────────────────────────────
 
 def test_tss_set_on_all_hr_workouts(prod_db):
-    """
-    Every workout with avg_heart_rate_bpm must also have training_stress_score.
-    If _compute_tss() ran to completion, no row satisfies (hr NOT NULL AND tss IS NULL).
-    """
+    """Every workout with avg_heart_rate_bpm must also have training_stress_score."""
     missed = prod_db.execute(
         "SELECT COUNT(*) FROM workouts "
         "WHERE avg_heart_rate_bpm IS NOT NULL "
         "AND training_stress_score IS NULL"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert missed == 0, (
         f"{missed} workouts have HR data but no TSS — "
         "did you run the ingester's _compute_tss() phase?"
     )
 
-    # Sanity floor: at least 100 workouts should have TSS set
     tss_count = prod_db.execute(
         "SELECT COUNT(*) FROM workouts WHERE training_stress_score IS NOT NULL"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert tss_count >= 100, f"Only {tss_count} workouts have TSS (expected ≥100)"
 
 
@@ -220,13 +204,13 @@ def test_atl_ctl_tsb_fully_populated(prod_db):
     null_load = prod_db.execute(
         "SELECT COUNT(*) FROM daily_health "
         "WHERE atl IS NULL OR ctl IS NULL OR tsb IS NULL"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert null_load == 0, (
         f"{null_load} daily_health rows have NULL ATL/CTL/TSB — "
         "did you run _compute_load()?"
     )
 
-    max_ctl = prod_db.execute("SELECT MAX(ctl) FROM daily_health").fetchone()[0]
+    max_ctl = prod_db.execute("SELECT MAX(ctl) FROM daily_health").fetchone()["max"]
     assert max_ctl is not None and max_ctl > 10, (
         f"MAX(ctl) = {max_ctl} — training load was never meaningfully computed"
     )
@@ -239,7 +223,7 @@ def test_vdot_exact_count_and_spot_check(prod_db):
     The vdot_paces table must have exactly 28 rows (VDOT 30–85).
     VDOT=50 values are verified against Daniels' Running Formula 4th ed., Table 3.1.
     """
-    count = prod_db.execute("SELECT COUNT(*) FROM vdot_paces").fetchone()[0]
+    count = prod_db.execute("SELECT COUNT(*) FROM vdot_paces").fetchone()["count"]
     assert count == 28, f"vdot_paces has {count} rows (expected 28)"
 
     row = prod_db.execute(
@@ -248,7 +232,7 @@ def test_vdot_exact_count_and_spot_check(prod_db):
         "FROM vdot_paces WHERE vdot = 50"
     ).fetchone()
     assert row is not None, "VDOT=50 row is missing"
-    actual = dict(zip(VDOT_50.keys(), row))
+    actual = {k: row[k] for k in VDOT_50}
     assert actual == VDOT_50, (
         f"VDOT=50 mismatch.\n  expected: {VDOT_50}\n  got:      {actual}"
     )
@@ -257,11 +241,8 @@ def test_vdot_exact_count_and_spot_check(prod_db):
 # ─── Data freshness ───────────────────────────────────────────────────────────
 
 def test_daily_health_data_is_recent(prod_db):
-    """
-    The most recent daily_health row must not be older than 14 days.
-    If this fails, sync the Apple Watch and re-run etl/ingest_health.py.
-    """
-    latest = prod_db.execute("SELECT MAX(date) FROM daily_health").fetchone()[0]
+    """The most recent daily_health row must not be older than 14 days."""
+    latest = prod_db.execute("SELECT MAX(date) FROM daily_health").fetchone()["max"]
     assert latest is not None, "daily_health table is empty"
     age_days = (date.today() - date.fromisoformat(latest)).days
     assert age_days <= 14, (
@@ -271,13 +252,10 @@ def test_daily_health_data_is_recent(prod_db):
 
 
 def test_workouts_data_is_recent(prod_db):
-    """
-    The most recent workout must not be older than 21 days (allows for rest weeks).
-    If this fails, sync the Apple Watch and re-run etl/ingest_health.py.
-    """
+    """The most recent workout must not be older than 21 days (allows for rest weeks)."""
     latest = prod_db.execute(
-        "SELECT MAX(date(start_date)) FROM workouts"
-    ).fetchone()[0]
+        "SELECT MAX(LEFT(start_date, 10)) FROM workouts"
+    ).fetchone()["max"]
     assert latest is not None, "workouts table is empty"
     age_days = (date.today() - date.fromisoformat(latest)).days
     assert age_days <= 21, (
@@ -289,14 +267,11 @@ def test_workouts_data_is_recent(prod_db):
 # ─── Logical coherence ────────────────────────────────────────────────────────
 
 def test_no_workouts_with_distance_but_zero_duration(prod_db):
-    """
-    A workout with distance_km > 0 and duration_min = 0 would produce infinite
-    pace (divide-by-zero) in any pace calculation.
-    """
+    """A workout with distance_km > 0 and duration_min = 0 would produce infinite pace."""
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM workouts "
         "WHERE distance_km > 0 AND (duration_min IS NULL OR duration_min = 0)"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, (
         f"{bad} workouts have distance_km > 0 but zero/null duration_min — "
         "pace calculations would divide by zero."
@@ -307,8 +282,6 @@ def test_sleep_stages_sum_within_tolerance_of_total(prod_db):
     """
     For rows that have sleep_total_min AND at least one stage column, the sum
     of the four stage columns must be within 30 minutes of sleep_total_min.
-    A larger discrepancy means the ETL aggregated stages and total from different
-    sources and the LLM would receive contradictory sleep data.
     """
     bad = prod_db.execute(
         """
@@ -322,7 +295,7 @@ def test_sleep_stages_sum_within_tolerance_of_total(prod_db):
                 - sleep_total_min
               ) > 30
         """
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, (
         f"{bad} daily_health rows have sleep stage sums that diverge from "
         "sleep_total_min by more than 30 minutes."
@@ -330,14 +303,11 @@ def test_sleep_stages_sum_within_tolerance_of_total(prod_db):
 
 
 def test_long_workouts_have_positive_calories(prod_db):
-    """
-    Any workout with duration_min > 30 that has a non-null active_calories value
-    must have calories > 0. A zero-calorie long effort signals an ETL parsing error.
-    """
+    """Any workout with duration_min > 30 that has calories must have calories > 0."""
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM workouts "
         "WHERE duration_min > 30 AND active_calories IS NOT NULL AND active_calories = 0"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, (
         f"{bad} workouts lasting >30 min have active_calories = 0 (ETL parsing error)."
     )
@@ -346,13 +316,10 @@ def test_long_workouts_have_positive_calories(prod_db):
 # ─── Agent-written data integrity ─────────────────────────────────────────────
 
 def test_planned_workouts_use_known_activity_types(prod_db):
-    """
-    The LLM may only plan sessions with activity_type values that the planner
-    explicitly supports.  Any other value signals a hallucinated type.
-    """
+    """The LLM may only plan sessions with known activity_type values."""
     allowed = {"running", "strength", "rest", "cross_training"}
     found = {
-        row[0]
+        row["activity_type"]
         for row in prod_db.execute("SELECT DISTINCT activity_type FROM planned_workouts")
     }
     unknown = found - allowed
@@ -366,7 +333,7 @@ def test_strength_sets_have_sane_weights(prod_db):
     """No strength_set should have weight_kg > 500 kg (world-record headroom)."""
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM strength_sets WHERE weight_kg IS NOT NULL AND weight_kg > 500"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, f"{bad} strength_sets have weight_kg > 500 kg (likely hallucinated)."
 
 
@@ -374,7 +341,7 @@ def test_strength_sets_have_sane_reps(prod_db):
     """No strength_set should have reps > 100 (physiologically implausible for weighted work)."""
     bad = prod_db.execute(
         "SELECT COUNT(*) FROM strength_sets WHERE reps IS NOT NULL AND reps > 100"
-    ).fetchone()[0]
+    ).fetchone()["count"]
     assert bad == 0, f"{bad} strength_sets have reps > 100 (likely hallucinated)."
 
 
@@ -386,20 +353,22 @@ def test_sleep_aggregate_matches_raw(prod_db):
     for a stable historical date (2025-05-25).
     """
     row = prod_db.execute(
-        "SELECT sleep_total_min FROM daily_health WHERE date = ?",
+        "SELECT sleep_total_min FROM daily_health WHERE date = %s",
         (SLEEP_CHECK_DATE,),
     ).fetchone()
     assert row is not None, f"No daily_health row for {SLEEP_CHECK_DATE}"
-    assert row[0] is not None, f"sleep_total_min is NULL for {SLEEP_CHECK_DATE}"
+    assert row["sleep_total_min"] is not None, f"sleep_total_min is NULL for {SLEEP_CHECK_DATE}"
 
-    raw_sum = prod_db.execute(
-        "SELECT SUM(duration_min) FROM sleep_records "
-        "WHERE date = ? AND stage != 'in_bed'",
+    raw_row = prod_db.execute(
+        "SELECT SUM(duration_min) AS total FROM sleep_records "
+        "WHERE date = %s AND stage != 'in_bed'",
         (SLEEP_CHECK_DATE,),
-    ).fetchone()[0]
+    ).fetchone()
+    assert raw_row is not None, f"No sleep_records for {SLEEP_CHECK_DATE}"
+    raw_sum = raw_row["total"]
     assert raw_sum is not None, f"No sleep_records for {SLEEP_CHECK_DATE}"
 
-    assert abs(row[0] - raw_sum) < 0.01, (
+    assert abs(row["sleep_total_min"] - raw_sum) < 0.01, (
         f"sleep_total_min mismatch for {SLEEP_CHECK_DATE}: "
-        f"daily_health={row[0]} vs raw_sum={raw_sum}"
+        f"daily_health={row['sleep_total_min']} vs raw_sum={raw_sum}"
     )

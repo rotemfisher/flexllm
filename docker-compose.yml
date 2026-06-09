@@ -53,7 +53,6 @@ services:
     restart: unless-stopped
     environment:
       ENVIRONMENT: prod
-      DB_PATH: /data/personal/running.db
       DATABASE_URL: postgresql://${POSTGRES_USER:-flexllm}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/flexllm
       # Use the Qdrant service instead of the embedded file client.
       QDRANT_URL: http://qdrant:6333

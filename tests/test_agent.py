@@ -8,7 +8,6 @@ Covers:
   - memory.py:   _week_start, _messages_to_text, SummaryStore, generate_*, save_session_summary
   - prompts.py:  build_*_prompt
 """
-import sqlite3
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -475,18 +474,25 @@ class TestMessagesToText:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @pytest.fixture()
-def store(tmp_path):
-    return SummaryStore(str(tmp_path / "summaries.db"))
+def store(pg_temp_dsn, monkeypatch):
+    from src.config import config
+    monkeypatch.setattr(config, "DATABASE_URL", pg_temp_dsn)
+    return SummaryStore()
 
 
 class TestSummaryStore:
-    def test_schema_created_on_init(self, tmp_path):
-        db_path = str(tmp_path / "s.db")
-        SummaryStore(db_path)
-        con = sqlite3.connect(db_path)
-        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        con.close()
-        assert "conversation_summaries" in tables
+    def test_schema_created_on_init(self, pg_temp_dsn, monkeypatch):
+        import psycopg
+        from psycopg.rows import dict_row
+        from src.config import config
+        monkeypatch.setattr(config, "DATABASE_URL", pg_temp_dsn)
+        SummaryStore()
+        with psycopg.connect(pg_temp_dsn, row_factory=dict_row, autocommit=True) as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_name = 'conversation_summaries' AND table_schema = current_schema()"
+            ).fetchone()
+        assert row["count"] > 0
 
     def test_save_and_retrieve_daily(self, store):
         store.save(date.today(), "trainer", "daily", "• Ran 10k")

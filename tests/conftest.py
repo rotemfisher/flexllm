@@ -3,47 +3,79 @@ tests/conftest.py  —  Shared pytest fixtures for the FlexLLM test suite.
 
 Fixtures
 ────────
-  prod_db      session-scoped, read-only sqlite3 connection to running.db
-  qdrant_col   session-scoped (client, collection_name) tuple for the coaching_books
-               Qdrant collection; dense + sparse models loaded once per session
-  temp_db      function-scoped Path to a fresh temporary SQLite file;
-               auto-cleaned by pytest's tmp_path machinery
+  prod_db         session-scoped read-only psycopg connection to the production PostgreSQL DB
+  pg_temp_dsn     function-scoped PostgreSQL URL pointing at a fresh throw-away schema;
+                  schema is populated with sql/schema.sql and dropped on teardown
+  qdrant_col      session-scoped (client, collection_name) tuple for coaching_books
+  apple_health_xml session-scoped path to the Apple Health XML export
 """
 
-import sqlite3
 import sys
+import uuid
 from pathlib import Path
+from urllib.parse import urlparse, urlencode, urlunparse
 
+import psycopg
+from psycopg.rows import dict_row
 import pytest
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.config import config
 from src.tracing import setup_tracing
-# Use a dedicated test project so test traces never mix with real coaching sessions.
 setup_tracing(project="flexllm-test")
+
+
+def _make_schema_url(base_url: str, schema: str) -> str:
+    """Return a PostgreSQL URL with search_path set to *schema*."""
+    p = urlparse(base_url)
+    query = urlencode({"options": f"-csearch_path={schema}"})
+    return urlunparse(p._replace(query=query))
+
+
+_BASE_DSN = config.DATABASE_URL
 
 
 # ── prod_db ───────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
 def prod_db():
-    """
-    Read-only connection to data/personal/running.db.
-
-    Uses SQLite URI mode (?mode=ro) so the engine refuses any accidental write
-    at the OS level — tests cannot corrupt production data even if they try.
-    row_factory = sqlite3.Row enables column access by name in assertions.
-    """
-    db_path = ROOT / "data" / "personal" / "running.db"
-    if not db_path.exists():
-        pytest.skip(
-            "data/personal/running.db not found — run `python etl/ingest_health.py` first"
-        )
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
+    """Read-only psycopg connection to the production PostgreSQL DB."""
+    try:
+        con = psycopg.connect(_BASE_DSN, row_factory=dict_row, autocommit=True)
+    except Exception as e:
+        pytest.skip(f"PostgreSQL unavailable ({e}) — run docker compose up first")
     yield con
     con.close()
+
+
+# ── pg_temp_dsn ───────────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def pg_temp_dsn():
+    """
+    PostgreSQL URL pointing at a fresh schema, populated with sql/schema.sql.
+    The schema is dropped on teardown so each test starts with a clean slate.
+    """
+    schema = f"test_{uuid.uuid4().hex[:8]}"
+
+    with psycopg.connect(_BASE_DSN, autocommit=True) as admin:
+        admin.execute(f"CREATE SCHEMA {schema}")
+
+    dsn = _make_schema_url(_BASE_DSN, schema)
+    schema_sql = (ROOT / "sql" / "schema.sql").read_text()
+
+    with psycopg.connect(dsn) as con:
+        for stmt in schema_sql.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                con.execute(stmt)
+
+    yield dsn
+
+    with psycopg.connect(_BASE_DSN, autocommit=True) as admin:
+        admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
 
 
 # ── qdrant_col ────────────────────────────────────────────────────────────────
@@ -70,9 +102,6 @@ def qdrant_col():
         pytest.skip(f"required package not installed: {e}")
 
     try:
-        # rag_tool caches a module-level QdrantClient that holds the file lock.
-        # Release it before the fixture opens its own connection so tests can
-        # run alongside a partially-initialised app in the same process.
         import src.tools.rag_tool as _rt
         if _rt._client is not None:
             try:
@@ -87,18 +116,16 @@ def qdrant_col():
         client = QdrantClient(path=str(qdrant_path))
     except RuntimeError as e:
         pytest.skip(
-            f"Qdrant DB locked by an external process (is the Chainlit app running?). "
+            f"Qdrant DB locked by an external process (is the app running?). "
             f"Stop it and retry.\nDetail: {e}"
         )
 
     try:
-        collections  = {c.name for c in client.get_collections().collections}
+        collections = {c.name for c in client.get_collections().collections}
         if "coaching_books" not in collections:
             client.close()
             pytest.skip("coaching_books collection not found — run `python etl/embed_books.py` first")
 
-        # local_files_only avoids a HuggingFace Hub network check for the PEFT
-        # adapter config — model is always cached locally after the first run.
         dense_model  = SentenceTransformer("BAAI/bge-large-en-v1.5", device="cpu",
                                            local_files_only=True)
         sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
@@ -111,34 +138,11 @@ def qdrant_col():
 
 @pytest.fixture(scope="session")
 def apple_health_xml():
-    """
-    Path to the Apple Health XML export.
-
-    Skips loudly if the file is absent so slow ingest tests are omitted in CI
-    where personal data is not available.
-    """
+    """Path to the Apple Health XML export; skips if absent."""
     from etl.ingest_health import XML_FILE
     if not XML_FILE.exists():
         pytest.skip(
             f"Apple Health XML not found ({XML_FILE.name}) "
-            "— run `python etl/ingest_health.py` first"
+            "— export from the Health app first"
         )
     return XML_FILE
-
-
-# ── temp_db ───────────────────────────────────────────────────────────────────
-
-@pytest.fixture()
-def temp_db(tmp_path):
-    """
-    Path to a fresh temporary SQLite file for ETL smoke tests.
-
-    tmp_path is pytest's built-in per-test isolated directory — unique,
-    auto-cleaned after the session, and safe for parallel test runs.
-    WAL sibling files (-shm, -wal) are also removed on teardown.
-    """
-    db = tmp_path / "test_running.db"
-    yield db
-    for suffix in ("-shm", "-wal"):
-        sib = db.parent / (db.name + suffix)
-        sib.unlink(missing_ok=True)

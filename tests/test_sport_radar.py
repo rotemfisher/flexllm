@@ -1,11 +1,9 @@
 """
 tests/test_sport_radar.py — Unit tests for check_upcoming_race_or_test and check_training_anomaly.
 
-All DB interaction is mocked via sqlite3 in-memory databases so tests run without
-the production running.db and without any real training data.
+All DB interaction is mocked so tests run without real training data.
 """
 
-import sqlite3
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +24,7 @@ from src.tools.sport_radar_tool import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _row(**kwargs):
-    """Build a sqlite3.Row-like MagicMock from keyword arguments."""
+    """Build a dict-like MagicMock from keyword arguments."""
     mock = MagicMock()
     mock.__getitem__ = lambda self, k: kwargs.get(k)
     mock.keys = lambda: list(kwargs)

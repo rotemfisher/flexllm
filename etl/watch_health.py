@@ -10,7 +10,7 @@ Works both as a standalone process and as a Docker service.
 
 Usage:
     python etl/watch_health.py
-    python etl/watch_health.py --export-dir /path/to/export --db /path/to/running.db
+    python etl/watch_health.py --export-dir /path/to/export
     python etl/watch_health.py --once        # single ingest pass, then exit
     python etl/watch_health.py --debounce 5  # wait 5 s after last event
 """
