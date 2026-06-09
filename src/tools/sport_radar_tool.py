@@ -76,7 +76,7 @@ def check_upcoming_race_or_test() -> str:
                 """
                 SELECT day_date, workout_type, description, phase, is_assessment, notes
                 FROM planned_workouts
-                WHERE day_date BETWEEN ? AND ?
+                WHERE day_date BETWEEN %s AND %s
                   AND status = 'planned'
                 ORDER BY day_date ASC
                 """,
@@ -252,7 +252,7 @@ def check_training_anomaly(client_report: str = "") -> str:
             last_run = con.execute(
                 """
                 SELECT start_date, distance_km,
-                       ROUND(duration_min / NULLIF(distance_km, 0), 4) AS pace,
+                       ROUND((duration_min / NULLIF(distance_km, 0))::numeric, 4) AS pace,
                        avg_heart_rate_bpm AS hr, rpe
                 FROM workouts
                 WHERE activity_type = 'running'
@@ -272,13 +272,13 @@ def check_training_anomaly(client_report: str = "") -> str:
                         AVG(hr)                AS avg_hr,
                         COUNT(*)               AS n
                     FROM (
-                        SELECT ROUND(duration_min / NULLIF(distance_km, 0), 4) AS pace,
+                        SELECT ROUND((duration_min / NULLIF(distance_km, 0))::numeric, 4) AS pace,
                                avg_heart_rate_bpm AS hr
                         FROM workouts
                         WHERE activity_type = 'running'
                           AND distance_km > 0.5
-                          AND start_date >= ?
-                          AND start_date < ?
+                          AND start_date >= %s
+                          AND start_date < %s
                     )
                     """,
                     (cutoff, last_run["start_date"]),
@@ -359,8 +359,8 @@ def check_training_anomaly(client_report: str = "") -> str:
                         GROUP BY workout_id
                     ) agg ON agg.workout_id = w.id
                     WHERE w.activity_type = 'strength'
-                      AND w.start_date >= ?
-                      AND w.start_date < ?
+                      AND w.start_date >= %s
+                      AND w.start_date < %s
                       AND w.rpe IS NOT NULL
                     """,
                     (cutoff, last_str["start_date"]),

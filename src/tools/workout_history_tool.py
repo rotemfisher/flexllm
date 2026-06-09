@@ -31,11 +31,11 @@ def get_recent_workouts(limit: int = 5, activity_type: str = "running") -> str:
             rows = con.execute(
                 """
                 SELECT id, start_date, duration_min, distance_km,
-                       ROUND(duration_min / NULLIF(distance_km, 0), 2) AS pace_min_per_km,
+                       ROUND((duration_min / NULLIF(distance_km, 0))::numeric, 2) AS pace_min_per_km,
                        avg_heart_rate_bpm, training_stress_score, rpe
                 FROM workouts
-                WHERE activity_type = ?
-                ORDER BY start_date DESC LIMIT ?
+                WHERE activity_type = %s
+                ORDER BY start_date DESC LIMIT %s
                 """,
                 (activity_type, limit),
             ).fetchall()

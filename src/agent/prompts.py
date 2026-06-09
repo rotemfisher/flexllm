@@ -72,6 +72,10 @@ CRITICAL OUTPUT RULES:
 3. Returning an empty message is NEVER acceptable.
 4. Never split a multi-step protocol across conversational turns — complete all
    required tool calls before writing your final reply.
+5. NEVER output raw JSON or tool argument payloads in your response text. Tool calls
+   (save_workout_plan, log_injury, log_strength_sets, etc.) happen silently in the
+   background. After a write tool call, confirm with ONE short plain-text sentence
+   (e.g. "Plan saved for the week of 2026-06-14 ✓"). Never print JSON blocks.
 
 TELEGRAM FORMATTING (strictly enforced):
 - Use **bold** for section titles and key values. Never use ### or #### headers.
@@ -174,6 +178,8 @@ The KNOWLEDGE BASE passages are already injected above — read them FIRST.
      ⛔ NEVER call trainer_transfer without ALSO calling save_workout_plan in the same response.
      ⛔ Writing "the plan has been saved" without calling save_workout_plan is a critical failure.
      ⛔ Do NOT skip the handoff — every new plan triggers a full multi-specialist onboarding.
+     ⛔ NEVER print the JSON payload of save_workout_plan in your reply text. The call is silent.
+        After saving, write one sentence: "Plan saved for the week of {week_start} ✓" — nothing more.
 
 ════════════════════════════════════════════════════
 TOOL RULES

@@ -369,8 +369,13 @@ async def _stream_reply(
                 if agent_buf and placeholder and now - last_edit_at >= MIN_EDIT_INTERVAL:
                     preview = _quick_strip_md(f"**[{current_label}]**\n{agent_buf}")
                     try:
-                        await placeholder.edit_text(preview[:_TG_MAX_LEN] + " ▌")
+                        await asyncio.wait_for(
+                            placeholder.edit_text(preview[:_TG_MAX_LEN] + " ▌"),
+                            timeout=4.0,
+                        )
                         last_edit_at = now
+                    except asyncio.TimeoutError:
+                        pass  # skip this preview tick; final flush will still deliver the full message
                     except tg_error.BadRequest as e:
                         if "Message is not modified" not in str(e):
                             logger.warning("Streaming edit failed: %s", e)
@@ -428,6 +433,35 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         parse_mode="HTML",
     )
     return ONBOARDING_NAME
+
+
+# ── /reset ────────────────────────────────────────────────────────────────────
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Delete all LangGraph checkpoints for this chat and return to the start."""
+    thread_id = str(update.effective_chat.id)
+    try:
+        async with await psycopg.AsyncConnection.connect(config.DATABASE_URL) as conn:
+            await conn.execute(
+                "DELETE FROM checkpoint_writes WHERE thread_id = %s", (thread_id,)
+            )
+            await conn.execute(
+                "DELETE FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,)
+            )
+            await conn.execute(
+                "DELETE FROM checkpoints WHERE thread_id = %s", (thread_id,)
+            )
+            await conn.commit()
+    except Exception as exc:
+        logger.exception("Reset failed: %s", exc)
+        await update.message.reply_text("⚠️ Reset failed — could not clear conversation history.")
+        return ConversationHandler.END
+
+    context.chat_data.clear()
+    await update.message.reply_text(
+        "✅ Conversation reset. All memory cleared.\n\nSend /start to begin a fresh session."
+    )
+    return ConversationHandler.END
 
 
 # ── Onboarding steps ──────────────────────────────────────────────────────────
@@ -697,7 +731,10 @@ def main() -> None:
             ONBOARDING_MEDICAL: [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, onboarding_medical)],
             CHAT:               [MessageHandler(filters.TEXT & ~filters.COMMAND & OWNER_FILTER, chat_message)],
         },
-        fallbacks=[CommandHandler("cancel", cmd_cancel, filters=OWNER_FILTER)],
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel, filters=OWNER_FILTER),
+            CommandHandler("reset",  cmd_reset,  filters=OWNER_FILTER),
+        ],
         per_chat=True,
         per_message=False,
     )

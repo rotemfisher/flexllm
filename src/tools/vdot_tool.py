@@ -33,7 +33,7 @@ def get_vdot_paces(vdot: int) -> str:
     try:
         with db_ro() as con:
             row = con.execute(
-                "SELECT * FROM vdot_paces ORDER BY ABS(vdot - ?) ASC LIMIT 1", (vdot,)
+                "SELECT * FROM vdot_paces ORDER BY ABS(vdot - %s) ASC LIMIT 1", (vdot,)
             ).fetchone()
 
         if not row:

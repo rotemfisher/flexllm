@@ -135,7 +135,7 @@ def get_recent_strength_sets(exercise_name: str, sessions: int = 4) -> str:
                 JOIN workouts w ON w.id = ss.workout_id
                 WHERE ss.exercise_name = %s
                 ORDER BY w.start_date DESC
-                LIMIT ?
+                LIMIT %s
                 """,
                 (name, sessions),
             ).fetchall()

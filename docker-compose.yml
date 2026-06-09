@@ -64,7 +64,7 @@ services:
       # host.docker.internal resolves to the host on Docker Desktop (Mac/Win).
       # On Linux the extra_hosts entry below maps it via host-gateway.
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      HF_HOME: /data/hf_cache
+      HF_HOME: /app/data/hf_cache
       # Telegram bot token from @BotFather
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be set in .env}
       # Your numeric Telegram user ID from @userinfobot — bot ignores all others
@@ -73,7 +73,7 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-flexllm-prod}
     volumes:
-      - ./data:/data:rw
+      - ./data:/app/data:rw
       - model_cache:/root/.cache/huggingface
     ports:
       - "8000:8000"
@@ -106,11 +106,11 @@ services:
     restart: unless-stopped
     command: python etl/watch_health.py
     environment:
-      HEALTH_EXPORT_DIR: /data/personal/apple_health_export
+      HEALTH_EXPORT_DIR: /app/data/personal/apple_health_export
       DATABASE_URL: postgresql://${POSTGRES_USER:-flexllm}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/flexllm
       PYTHONPATH: /app
     volumes:
-      - ./data:/data:rw
+      - ./data:/app/data:rw
     networks:
       - flexllm
     depends_on:

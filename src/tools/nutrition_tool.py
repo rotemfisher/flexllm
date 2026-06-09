@@ -32,7 +32,8 @@ def get_nutrition_profile() -> str:
 
             # Use whichever source is more recent: daily_health or onboarding profile.
             health_date = health["date"] if health else None
-            profile_date = (profile_weight_row["updated_at"] or "")[:10] if profile_weight_row else None
+            _upd = profile_weight_row["updated_at"] if profile_weight_row else None
+            profile_date = _upd.strftime("%Y-%m-%d") if _upd else None
             if health_date and profile_date and health_date >= profile_date:
                 current_weight = health["body_mass_kg"]
             elif profile_weight_row:
@@ -46,7 +47,7 @@ def get_nutrition_profile() -> str:
                 """
                 SELECT AVG(active_calories) as avg_active_cals
                 FROM daily_health
-                WHERE date >= CURRENT_DATE - INTERVAL '7 days' AND active_calories IS NOT NULL
+                WHERE date::date >= CURRENT_DATE - INTERVAL '7 days' AND active_calories IS NOT NULL
                 """
             ).fetchone()
             avg_active_cals = round(activity["avg_active_cals"] or 0)

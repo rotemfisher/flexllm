@@ -35,11 +35,11 @@ def get_progress_report(weeks: int = 8) -> str:
                     TO_CHAR(start_date::date, 'IYYY-"W"IW')  AS week,
                     MIN(substr(start_date, 1, 10))           AS week_from,
                     COUNT(*)                                 AS runs,
-                    ROUND(SUM(distance_km), 1)               AS total_km,
-                    ROUND(AVG(pace_min_per_km), 2)           AS avg_pace,
-                    ROUND(AVG(avg_heart_rate_bpm), 0)        AS avg_hr,
-                    ROUND(AVG(CAST(rpe AS REAL)), 1)         AS avg_rpe,
-                    ROUND(SUM(training_stress_score), 0)     AS total_tss
+                    ROUND(SUM(distance_km)::numeric, 1)               AS total_km,
+                    ROUND(AVG(pace_min_per_km)::numeric, 2)           AS avg_pace,
+                    ROUND(AVG(avg_heart_rate_bpm)::numeric, 0)        AS avg_hr,
+                    ROUND(AVG(rpe::numeric), 1)                       AS avg_rpe,
+                    ROUND(SUM(training_stress_score)::numeric, 0)     AS total_tss
                 FROM v_running_overview
                 WHERE start_date::date >= CURRENT_DATE + %s::interval
                 GROUP BY week
@@ -64,7 +64,7 @@ def get_progress_report(weeks: int = 8) -> str:
                     COUNT(*)                                                        AS total,
                     SUM(CASE WHEN status IN ('active','recovering') THEN 1 ELSE 0 END) AS active_count
                 FROM injuries
-                WHERE onset_date >= CURRENT_DATE + %s::interval
+                WHERE onset_date::date >= CURRENT_DATE + %s::interval
                 """,
                 (f"-{weeks} weeks",),
             ).fetchone()

@@ -75,7 +75,7 @@ def get_injury_recovery_trend(injury_id: int, days: int = 14) -> str:
                 """
                 SELECT check_date, pain_scale, pain_context, notes
                 FROM injury_checks
-                WHERE injury_id = %s AND check_date >= CURRENT_DATE + %s::interval
+                WHERE injury_id = %s AND check_date::date >= CURRENT_DATE + %s::interval
                 ORDER BY check_date ASC
                 """,
                 (injury_id, f"-{days} days"),
