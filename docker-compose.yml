@@ -79,6 +79,9 @@ services:
       - "8000:8000"
     networks:
       - flexllm
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -142,6 +142,68 @@ def _quick_strip_md(text: str) -> str:
     return text.strip()
 
 
+def _latex_to_plain(math: str) -> str:
+    """Convert LaTeX math content to readable plain text (used on extracted math blocks)."""
+    math = re.sub(r'\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^}]*)\}', r'\1', math)
+    math = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', math)
+    math = re.sub(r'\\sqrt\{([^}]*)\}', r'√\1', math)
+    math = re.sub(r'\^\{([^}]*)\}', r'^\1', math)
+    math = re.sub(r'_\{([^}]*)\}', r'_\1', math)
+    for _cmd, _sym in [
+        (r'\times', '×'), (r'\div', '÷'), (r'\cdot', '·'),
+        (r'\leq', '≤'), (r'\geq', '≥'), (r'\neq', '≠'),
+        (r'\approx', '≈'), (r'\pm', '±'), (r'\mp', '∓'),
+        (r'\alpha', 'α'), (r'\beta', 'β'), (r'\gamma', 'γ'),
+        (r'\delta', 'δ'), (r'\sigma', 'σ'), (r'\pi', 'π'),
+        (r'\mu', 'μ'), (r'\sum', 'Σ'), (r'\infty', '∞'),
+        (r'\rightarrow', '→'), (r'\leftarrow', '←'),
+        (r'\quad', ' '), (r'\qquad', ' '), (r'\,', ' '),
+    ]:
+        math = math.replace(_cmd, _sym)
+    math = re.sub(r'\\[a-zA-Z]+\*?', '', math)
+    math = math.replace('{', '').replace('}', '')
+    return math.strip()
+
+
+def _strip_inline_latex(text: str) -> str:
+    """Replace the most common LaTeX commands that may appear outside math delimiters."""
+    text = re.sub(r'\\(?:text|mathrm|mathbf)\{([^}]*)\}', r'\1', text)
+    for _cmd, _sym in [
+        (r'\times', '×'), (r'\div', '÷'), (r'\cdot', '·'),
+        (r'\leq', '≤'), (r'\geq', '≥'), (r'\approx', '≈'), (r'\pm', '±'),
+    ]:
+        text = text.replace(_cmd, _sym)
+    return text
+
+
+_WRITE_TOOLS = (
+    'save_workout_plan', 'log_injury', 'log_strength_sets',
+    'update_athlete_profile', 'log_workout_rpe_and_notes',
+    'replace_day_in_plan', 'update_planned_workout_status',
+    'log_fitness_assessment', 'resolve_injury', 'log_injury_checkin',
+)
+_TOOL_PAYLOAD_KEY = re.compile(
+    r'"(?:week_start|sessions|phase|body_part|target|workout_type|exercise)"'
+)
+
+
+def _strip_tool_leakage(text: str) -> str:
+    """Remove raw tool call payloads that the model incorrectly printed in its text output."""
+    for _tool in _WRITE_TOOLS:
+        # "tool_name({...})" spanning one or more lines up to the next blank line
+        text = re.sub(
+            rf'\b{re.escape(_tool)}\s*\(.*?(?=\n\n|\Z)',
+            '',
+            text,
+            flags=re.DOTALL,
+        )
+    # Fenced code blocks (```json ... ```) that contain tool payload keys
+    def _check_fence(m: re.Match) -> str:
+        return '' if _TOOL_PAYLOAD_KEY.search(m.group(0)) else m.group(0)
+    text = re.sub(r'```(?:json)?.*?```', _check_fence, text, flags=re.DOTALL)
+    return text
+
+
 def _md_to_tg_html(text: str) -> str:
     """Convert standard Markdown to Telegram-safe HTML.
 
@@ -202,9 +264,10 @@ def _md_to_tg_html(text: str) -> str:
     text = re.sub(r'(?<!\w)\*([^\n*]+?)\*(?!\w)', r'<i>\1</i>', text)
     text = re.sub(r'(?<!\w)_([^\n_]+?)_(?!\w)', r'<i>\1</i>', text)
 
-    # 8. LaTeX math → plain text (strip delimiters, keep content)
-    text = re.sub(r'\\\[(.+?)\\\]', r'\1', text, flags=re.DOTALL)
-    text = re.sub(r'\\\((.+?)\\\)', r'\1', text)
+    # 8. LaTeX math → plain text (convert delimiters + internal commands)
+    text = re.sub(r'\\\[(.+?)\\\]', lambda m: _latex_to_plain(m.group(1)), text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.+?)\\\)', lambda m: _latex_to_plain(m.group(1)), text)
+    text = _strip_inline_latex(text)  # catch any LaTeX written outside math delimiters
 
     # 9. Horizontal rules → blank line
     text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
@@ -327,7 +390,8 @@ async def _stream_reply(
         follow-up messages.  Resets `placeholder` to None when done.
         """
         nonlocal placeholder
-        if not agent_buf.strip():
+        cleaned = _strip_tool_leakage(agent_buf)
+        if not cleaned.strip():
             try:
                 await placeholder.delete()
             except Exception:
@@ -335,7 +399,7 @@ async def _stream_reply(
             placeholder = None
             return
         header = f"**[{current_label}]**\n" if current_label else ""
-        html_chunks = _split_for_telegram(_md_to_tg_html(header + agent_buf))
+        html_chunks = _split_for_telegram(_md_to_tg_html(header + cleaned))
         await _send(html_chunks[0], edit_msg=placeholder)
         for extra in html_chunks[1:]:
             await _send(extra)
@@ -478,7 +542,24 @@ async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def onboarding_dob(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.chat_data["ob_dob"] = update.message.text.strip() or "1990-01-01"
+    raw = update.message.text.strip()
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', raw):
+        await update.message.reply_text(
+            "Please enter your date of birth in the format <b>YYYY-MM-DD</b>\n"
+            "<i>Example: 1992-07-15</i>",
+            parse_mode="HTML",
+        )
+        return ONBOARDING_DOB
+    try:
+        dt.date.fromisoformat(raw)
+    except ValueError:
+        await update.message.reply_text(
+            "That doesn't look like a valid date. Please use <b>YYYY-MM-DD</b>\n"
+            "<i>Example: 1992-07-15</i>",
+            parse_mode="HTML",
+        )
+        return ONBOARDING_DOB
+    context.chat_data["ob_dob"] = raw
     await update.message.reply_text(
         "What is your height in centimetres?\n<i>(e.g. 175)</i>",
         parse_mode="HTML",

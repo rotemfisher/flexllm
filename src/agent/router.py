@@ -51,13 +51,17 @@ Rules:
 1. "secondary" is [] when the message covers a single topic.
 2. List at most 2 secondary agents.
 3. Only use the exact specialist names above.
+4. Any message asking to build, create, or generate a "training plan", "workout plan", "running programme", "workout schedule", or "exercise programme" → primary MUST always be "trainer", even if the message mentions personal data, BMR, or profile.
+5. References to "my personal data", "my profile", "my stats", or "my goal" alone do NOT indicate dietitian — route based on the main request topic.
 
 Examples:
 "I twisted my ankle" → {"primary": "physiotherapist", "secondary": []}
 "I twisted my ankle and I need to update my nutrition plan for tomorrow" → {"primary": "physiotherapist", "secondary": ["dietitian"]}
 "Build me a training plan for my 10k" → {"primary": "trainer", "secondary": []}
 "I have no motivation and I'm not sleeping well" → {"primary": "psychologist", "secondary": ["recovery_coach"]}
-"I'm injured and feeling burned out and need diet help" → {"primary": "physiotherapist", "secondary": ["recovery_coach", "dietitian"]}\
+"I'm injured and feeling burned out and need diet help" → {"primary": "physiotherapist", "secondary": ["recovery_coach", "dietitian"]}
+"According to my personal data build me a professional training plan to reach my goal" → {"primary": "trainer", "secondary": ["dietitian"]}
+"Create a workout schedule based on my profile" → {"primary": "trainer", "secondary": []}\
 """
 
 
