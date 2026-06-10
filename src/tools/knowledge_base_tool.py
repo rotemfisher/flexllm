@@ -122,4 +122,9 @@ def search_knowledge_base(query: str, category: str | None = None, n_results: in
 
     except Exception as exc:
         logger.exception("search_knowledge_base error: %s", exc)
+        if "doesn't exist" in str(exc) or "Not found" in str(exc):
+            return (
+                "Knowledge base is not yet available (collection not initialised). "
+                "Proceed without citing the knowledge base for now."
+            )
         return f"Knowledge base search failed: {exc}"

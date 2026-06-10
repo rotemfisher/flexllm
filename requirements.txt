@@ -24,4 +24,5 @@ ragas==0.2.15
 # PDF page splitting and extraction (used in ETL and test_split.py)
 pypdf==5.6.0
 docling
+opencv-python-headless
 psycopg2-binary

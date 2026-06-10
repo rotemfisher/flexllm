@@ -24,10 +24,13 @@ def trainer_transfer(
     """
     HANDOFF — transfer control from the Trainer to another specialist.
 
-    CRITICAL: Call this as the LAST and ONLY tool in your response.
-    NEVER combine this with a domain tool (get_recent_workouts, save_workout_plan,
-    get_vdot_paces, etc.) in the same turn.
-    Complete all data-gathering and analysis first, THEN call this tool alone.
+    CRITICAL: Call this as the LAST tool in your response.
+    EXCEPTION: In the NEW PLAN CREATION PROTOCOL you MUST call save_workout_plan
+    AND this tool together in the same response — that is the only allowed pairing.
+    NEVER combine this with read-only domain tools (get_recent_workouts,
+    get_vdot_paces, get_current_workout_plan, etc.) in the same turn.
+    Complete all data-gathering and analysis first, THEN call this tool
+    (optionally paired with save_workout_plan if saving a new plan).
 
     target — choose exactly one string:
       "physiotherapist"  : athlete reports pain, injury, or movement limitation

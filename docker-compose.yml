@@ -72,6 +72,8 @@ services:
       # Tracing (optional)
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-flexllm-prod}
+      SCHEDULER_TIMEZONE: ${SCHEDULER_TIMEZONE:-Asia/Jerusalem}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ./data:/app/data:rw
       - model_cache:/root/.cache/huggingface
