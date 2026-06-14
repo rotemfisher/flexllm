@@ -20,7 +20,7 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 from src.config import config
 
 _SPARSE_MODEL = "Qdrant/bm25"
-_RERANK_MODEL = "BAAI/bge-reranker-large"
+_RERANK_MODEL = "BAAI/bge-reranker-base"
 
 # Loaded once per process; protected by a lock to prevent double-initialization
 # in multi-threaded LangChain runtimes.

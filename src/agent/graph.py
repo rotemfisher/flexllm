@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import re
 
@@ -315,7 +316,7 @@ def _rag_context_for(queries: list[str], n_per_query: int = 5) -> str:
             if key in seen:
                 continue
             seen.add(key)
-            sections.append(f"[search: {q}]\n{result}")
+            sections.append(result)
         if not sections:
             # Searched but found nothing — inject a hard red-flag so the model
             # cannot silently fall back to parametric knowledge.
@@ -409,6 +410,22 @@ def _citations_are_grounded(text: str, injected_titles: set[str]) -> bool:
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
+
+def _is_premature_analysis(text: str) -> bool:
+    """Return True when a response looks like a leaked internal analysis.
+
+    Catches the pattern where the model writes multi-line bullet-point topics
+    (e.g. 'improving lactate threshold for beginner runners') instead of calling
+    tools or writing a complete coaching response.  Only fires on short responses
+    that would normally be too brief to constitute real coaching advice.
+    """
+    stripped = text.strip()
+    return (
+        stripped.count("\n") >= 1          # multi-line → likely a list
+        and len(stripped) < 350            # too short for a real coaching response
+        and any(kw in stripped.lower() for kw in _PROFESSIONAL_KEYWORDS)
+    )
+
 
 def _trim_messages(messages: list[BaseMessage], max_messages: int = _MAX_HISTORY_MESSAGES) -> list[BaseMessage]:
     """Return the most recent up-to-max_messages messages.
@@ -595,7 +612,7 @@ def _make_agent_node(llm_with_tools, prompt_builder,
         if is_first_call and not is_fresh_handoff:
             if last_human:
                 rag_queries = _build_rag_queries(last_human_content, athlete_ctx, query_llm)
-                rag_ctx = _rag_context_for(rag_queries)
+                rag_ctx = _rag_context_for(rag_queries, n_per_query=3)
                 system_prompt += rag_ctx
                 injected_book_titles |= _extract_injected_titles(rag_ctx)
 
@@ -761,6 +778,29 @@ def _make_agent_node(llm_with_tools, prompt_builder,
             ]
             response = _safe_invoke(nudge, "announcement nudge")
             response = _resolve_tool_conflicts(response)
+        elif (
+            is_first_call
+            and not is_fresh_handoff
+            and not has_tool_calls
+            and not is_empty
+            and _is_premature_analysis(content)
+        ):
+            logger.warning(
+                "Premature analysis detected (%d chars) — nudging for complete action",
+                len(content.strip()),
+            )
+            nudge = messages + [
+                response,
+                HumanMessage(content=(
+                    "You wrote a short topic outline instead of taking action. "
+                    "Do NOT list topics or themes. Based on the SESSION STARTUP DATA "
+                    "and KNOWLEDGE BASE already in your context, proceed NOW: "
+                    "call the required tools (e.g. save_workout_plan) and write the "
+                    "complete coaching response. No topic lists, no preambles, no outlines."
+                )),
+            ]
+            response = _safe_invoke(nudge, "premature-analysis nudge")
+            response = _resolve_tool_conflicts(response)
         elif is_empty:
             logger.warning("Empty response (no prior tool) — nudging model to reply")
             nudge = messages + [
@@ -901,6 +941,39 @@ def _format_tool_error(error: Exception) -> str:
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
 
+async def _warmup_ollama(base_url: str, model_id: str) -> None:
+    """Preload a model into Ollama memory so the first real request skips cold-start.
+
+    Sends keep_alive=-1 (stay loaded indefinitely) with no prompt — Ollama loads
+    the weights and returns immediately without generating any tokens.
+    """
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            await client.post(
+                f"{base_url}/api/generate",
+                json={"model": model_id, "keep_alive": -1},
+            )
+        logger.info("Ollama warmup complete: %s", model_id)
+    except Exception as exc:
+        logger.warning("Ollama warmup failed for %s: %s", model_id, exc)
+
+
+async def _warmup_rag_models() -> None:
+    """Pre-load sentence-transformer RAG models in a background thread.
+
+    _get_models() initialises the dense embedder, sparse model, reranker, and
+    Qdrant client.  Running it once at startup means the first search_knowledge_base
+    call doesn't pay the ~60 s model-loading penalty.
+    """
+    try:
+        from src.tools.rag_tool import _get_models
+        await asyncio.to_thread(_get_models)
+        logger.info("RAG model warmup complete (bge-large + reranker loaded)")
+    except Exception as exc:
+        logger.warning("RAG model warmup failed: %s", exc)
+
+
 @asynccontextmanager
 async def build_multi_agent_graph():
     llm = ChatOllama(
@@ -1022,7 +1095,14 @@ async def build_multi_agent_graph():
 
     async with AsyncPostgresSaver.from_conn_string(config.DATABASE_URL) as checkpointer:
         await checkpointer.setup()
-        yield graph.compile(checkpointer=checkpointer)
+        compiled = graph.compile(checkpointer=checkpointer)
+
+        # Preload the lite Ollama model so the supervisor + RAG query steps
+        # on the first message don't pay the cold-start penalty.
+        lite_model = config.QUERY_MODEL_ID or config.MODEL_ID
+        asyncio.ensure_future(_warmup_ollama(config.OLLAMA_BASE_URL, lite_model))
+
+        yield compiled
 
 
 async def inject_bot_message_into_thread(text: str) -> None:

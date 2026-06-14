@@ -783,9 +783,29 @@ async def _post_shutdown(application: Application) -> None:
         await ctx.__aexit__(None, None, None)
 
 
+def _warmup_rag_sync() -> None:
+    """Load sentence-transformer models into memory before the first user message.
+
+    Called in a daemon thread right at process start so model loading happens
+    in parallel with PTB initialisation rather than blocking the first request.
+    Uses the same threading.Lock inside _get_models() so it's safe alongside
+    any concurrent LangGraph thread-pool calls.
+    """
+    try:
+        from src.tools.rag_tool import _get_models
+        _get_models()
+        logger.info("RAG model warmup complete (bge-large + reranker loaded)")
+    except Exception as exc:
+        logger.warning("RAG model warmup failed: %s", exc)
+
+
 def main() -> None:
     setup_logging()
     setup_tracing()
+
+    # Pre-load sentence-transformer models before the event loop starts so the
+    # first user request doesn't pay the 60-90 s cold-start penalty.
+    threading.Thread(target=_warmup_rag_sync, daemon=True, name="model-warmup").start()
 
     threading.Thread(target=_start_health_server, daemon=True, name="health-server").start()
     logger.info("Health server starting on port 8000")
